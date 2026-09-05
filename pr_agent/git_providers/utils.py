@@ -18,14 +18,18 @@ def apply_repo_settings(pr_url):
         repo_settings_file = None
         try:
             try:
-                repo_settings = context.get("repo_settings", None)
+                repo_settings_by_pr = context.get("repo_settings_by_pr", None)
             except Exception:
-                repo_settings = None
+                repo_settings_by_pr = None
                 pass
+            if not isinstance(repo_settings_by_pr, dict):
+                repo_settings_by_pr = {}
+            repo_settings = repo_settings_by_pr.get(pr_url, None)
             if repo_settings is None:  # None is different from "", which is a valid value
                 repo_settings = git_provider.get_repo_settings()
                 try:
-                    context["repo_settings"] = repo_settings
+                    repo_settings_by_pr[pr_url] = repo_settings
+                    context["repo_settings_by_pr"] = repo_settings_by_pr
                 except Exception:
                     pass
 
@@ -59,6 +63,27 @@ def apply_repo_settings(pr_url):
                             artifact={"error": e, "traceback": traceback.format_exc()})
                         new_settings = Dynaconf(settings_files=[repo_settings_file])
 
+                    prompt_overrides = set()
+                    try:
+                        current_settings_dict = get_settings().as_dict()
+                        for section, contents in new_settings.as_dict().items():
+                            if not isinstance(contents, dict):
+                                continue
+                            if "prompt" not in str(section).lower():
+                                continue
+                            old_section = current_settings_dict.get(section, {})
+                            if not isinstance(old_section, dict):
+                                old_section = {}
+                            for k in ("system", "user", "prompt"):
+                                if k not in contents:
+                                    continue
+                                new_v = contents.get(k)
+                                old_v = old_section.get(k)
+                                if str(new_v).strip() and str(new_v).strip() != str(old_v).strip():
+                                    prompt_overrides.add(f"{section}.{k}")
+                    except Exception:
+                        prompt_overrides = set()
+
                     for section, contents in new_settings.as_dict().items():
                         if not contents:
                             # Skip excluded items, such as forbidden to load env.
@@ -70,6 +95,9 @@ def apply_repo_settings(pr_url):
                         get_settings().unset(section)
                         get_settings().set(section, section_dict, merge=False)
                     get_logger().info(f"Applying repo settings:\n{new_settings.as_dict()}")
+                    if prompt_overrides:
+                        msg = "使用自定义prompt：" + ", ".join(sorted(prompt_overrides))
+                        get_logger().opt(colors=True).info(f"<yellow>{msg}</yellow>")
                 except Exception as e:
                     get_logger().warning(f"Failed to apply repo {category} settings, error: {str(e)}")
                     error_local = {'error': str(e), 'settings': repo_settings, 'category': category}

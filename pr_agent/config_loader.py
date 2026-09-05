@@ -1,3 +1,6 @@
+import copy
+from contextlib import contextmanager
+from contextvars import ContextVar
 from os.path import abspath, dirname, join
 from pathlib import Path
 from typing import Optional
@@ -23,12 +26,23 @@ global_settings = Dynaconf(
         "settings/generated_code_ignore.toml",
         "settings/language_extensions.toml",
         "settings/pr_reviewer_prompts.toml",
+        "settings/pr_reviewer_prompts_v2.toml",
+        "settings/pr_reviewer_prompts_v3.toml",
         "settings/pr_questions_prompts.toml",
         "settings/pr_line_questions_prompts.toml",
         "settings/pr_description_prompts.toml",
         "settings/code_suggestions/pr_code_suggestions_prompts.toml",
+        "settings/code_suggestions/pr_code_suggestions_prompts_v2.toml",
+        "settings/code_suggestions/pr_code_suggestions_prompts_v3.toml",
         "settings/code_suggestions/pr_code_suggestions_prompts_not_decoupled.toml",
+        "settings/code_suggestions/pr_code_suggestions_prompts_not_decoupled_v2.toml",
+        "settings/code_suggestions/pr_code_suggestions_prompts_not_decoupled_v3.toml",
         "settings/code_suggestions/pr_code_suggestions_reflect_prompts.toml",
+        "settings/code_suggestions/pr_code_suggestions_reflect_prompts_v2.toml",
+        "settings/code_suggestions/pr_code_suggestions_scenario_validator_prompts.toml",
+        "settings/pr_inline_selfcheck_prompts.toml",
+        "settings/pr_tier1_repair_prompts.toml",
+        "settings/prompt_evolution_prompts.toml",
         "settings/pr_information_from_user_prompts.toml",
         "settings/pr_update_changelog_prompts.toml",
         "settings/pr_custom_labels.toml",
@@ -36,12 +50,50 @@ global_settings = Dynaconf(
         "settings/custom_labels.toml",
         "settings/pr_help_prompts.toml",
         "settings/pr_help_docs_prompts.toml",
+        "settings/pr_doc_drift_prompts.toml",
         "settings/pr_help_docs_headings_prompts.toml",
+        "settings/pr_reviewer_prompts_python.toml",
+        "settings/pr_reviewer_prompts_python_v2.toml",
+        "settings/pr_reviewer_prompts_python_v3.toml",
+        "settings/pr_description_prompts_python.toml",
+        "settings/code_suggestions/pr_code_suggestions_prompts_python.toml",
+        "settings/code_suggestions/pr_code_suggestions_prompts_python_v2.toml",
+        "settings/code_suggestions/pr_code_suggestions_prompts_python_v3.toml",
         "settings/.secrets.toml",
         "settings_prod/.secrets.toml",
     ]],
     **dynconf_kwargs
 )
+
+_TASK_SETTINGS: ContextVar[Dynaconf | None] = ContextVar("pr_agent_task_settings", default=None)
+
+# Load user-defined prompts from 'pr_agent/settings/user_prompt' directory
+user_prompt_dir = join(current_dir, "settings", "user_prompt")
+if Path(user_prompt_dir).is_dir():
+    user_prompt_files = sorted(list(Path(user_prompt_dir).glob("*.toml")))
+    if user_prompt_files:
+        for f in user_prompt_files:
+            global_settings.load_file(str(f))
+
+
+@contextmanager
+def task_settings_context():
+    task_settings = copy.deepcopy(global_settings)
+    token = _TASK_SETTINGS.set(task_settings)
+    try:
+        yield task_settings
+    finally:
+        _TASK_SETTINGS.reset(token)
+
+
+@contextmanager
+def task_settings_override(settings):
+    """Expose an isolated settings object through ``get_settings`` for one task."""
+    token = _TASK_SETTINGS.set(settings)
+    try:
+        yield settings
+    finally:
+        _TASK_SETTINGS.reset(token)
 
 
 def get_settings(use_context=False):
@@ -54,6 +106,9 @@ def get_settings(use_context=False):
     Returns:
         Dynaconf: The current settings object, either from the context or the global default.
     """
+    task_settings = _TASK_SETTINGS.get()
+    if task_settings is not None:
+        return task_settings
     try:
         return context["settings"]
     except Exception:

@@ -341,8 +341,14 @@ class GitLabProvider(GitProvider):
         self.id_project, self.id_mr = self._parse_merge_request_url(merge_request_url)
         self.mr = self._get_merge_request()
         try:
-            self.last_diff = self.mr.diffs.list(get_all=True)[-1]
-        except IndexError as e:
+            diffs = self.mr.diffs.list(get_all=True)
+            # GitLab's diff-versions list order is not documented/guaranteed
+            # (observed newest-first against a real MR), but the previous
+            # `[-1]` blindly trusted list order and silently picked the
+            # OLDEST version. Picking explicitly by highest `id` is correct
+            # regardless of how the API happens to order the response.
+            self.last_diff = max(diffs, key=lambda d: d.id)
+        except (IndexError, ValueError) as e:
             get_logger().error(f"Could not get diff for merge request {self.id_mr}")
             raise DiffNotFoundError(f"Could not get diff for merge request {self.id_mr}") from e
 
@@ -551,107 +557,158 @@ class GitLabProvider(GitProvider):
         comment = self.mr.notes.get(comment_id).body
         return comment
 
+    @staticmethod
+    def _sanitize_provider_error(error: Exception) -> str:
+        message = re.sub(r"\s+", " ", str(error)).strip() or error.__class__.__name__
+        message = re.sub(
+            r"(?i)(authorization\s*:\s*bearer\s+)[^\s,;]+",
+            r"\1[REDACTED]",
+            message,
+        )
+        message = re.sub(
+            r"(?i)\b(api[_-]?key|access[_-]?token|token|password|secret)\s*[:=]\s*[\"']?[^\s,;&\"']+",
+            lambda match: f"{match.group(1)}=[REDACTED]",
+            message,
+        )
+        return message[:500]
+
+    def refresh_merge_request_diff(self) -> None:
+        self.diff_files = None
+        self.git_files = None
+        self._submodule_cache.clear()
+        self._set_merge_request(self.pr_url)
+
+    def _create_native_inline(
+        self,
+        body: str,
+        edit_type: str,
+        relevant_file: str,
+        relevant_line_in_file: str,
+        source_line_no: int,
+        target_file,
+        target_line_no: int,
+    ) -> tuple[object | None, dict, str]:
+        position = {}
+        try:
+            diff = self.get_relevant_diff(relevant_file, relevant_line_in_file)
+            if diff is None:
+                raise DiffNotFoundError(f"Could not get diff for merge request {self.id_mr}")
+            position = {
+                "position_type": "text",
+                "new_path": target_file.filename,
+                "old_path": target_file.old_filename if target_file.old_filename else target_file.filename,
+                "base_sha": diff.base_commit_sha,
+                "start_sha": diff.start_commit_sha,
+                "head_sha": diff.head_commit_sha,
+            }
+            if edit_type == "deletion":
+                position["old_line"] = source_line_no - 1
+            elif edit_type == "addition":
+                position["new_line"] = target_line_no - 1
+            else:
+                position["new_line"] = target_line_no - 1
+                position["old_line"] = source_line_no - 1
+            created = self.mr.discussions.create({"body": body, "position": position})
+            return created, position, ""
+        except Exception as exc:
+            return None, position, self._sanitize_provider_error(exc)
+
     def send_inline_comment(self, body: str, edit_type: str, found: bool, relevant_file: str,
                             relevant_line_in_file: str,
                             source_line_no: int, target_file: str, target_line_no: int,
-                            original_suggestion=None) -> None:
+                            original_suggestion=None, fallback: bool = True):
         if not found:
             get_logger().info(f"Could not find position for {relevant_file} {relevant_line_in_file}")
-        else:
-            # in order to have exact sha's we have to find correct diff for this change
-            diff = self.get_relevant_diff(relevant_file, relevant_line_in_file)
-            if diff is None:
-                get_logger().error(f"Could not get diff for merge request {self.id_mr}")
-                raise DiffNotFoundError(f"Could not get diff for merge request {self.id_mr}")
-            pos_obj = {'position_type': 'text',
-                       'new_path': target_file.filename,
-                       'old_path': target_file.old_filename if target_file.old_filename else target_file.filename,
-                       'base_sha': diff.base_commit_sha, 'start_sha': diff.start_commit_sha, 'head_sha': diff.head_commit_sha}
-            if edit_type == 'deletion':
-                pos_obj['old_line'] = source_line_no - 1
-            elif edit_type == 'addition':
-                pos_obj['new_line'] = target_line_no - 1
+            return None
+        created, position, error = self._create_native_inline(
+            body,
+            edit_type,
+            relevant_file,
+            relevant_line_in_file,
+            source_line_no,
+            target_file,
+            target_line_no,
+        )
+        if created is not None:
+            return created
+        get_logger().info(
+            f"Inline suggestion rejected for {relevant_file} in MR {self.id_mr}; "
+            f"position={position}, error: {error}"
+        )
+        if not fallback:
+            return None
+        try:
+            if 'suggestion_orig_location' in original_suggestion:
+                line_start = original_suggestion['suggestion_orig_location']['start_line']
+                line_end = original_suggestion['suggestion_orig_location']['end_line']
+                old_code_snippet = original_suggestion['prev_code_snippet']
+                new_code_snippet = original_suggestion['new_code_snippet']
+                content = original_suggestion['suggestion_summary']
+                label = original_suggestion['category']
+                score = original_suggestion.get('score', 7)
             else:
-                pos_obj['new_line'] = target_line_no - 1
-                pos_obj['old_line'] = source_line_no - 1
-            get_logger().debug(f"Creating comment in MR {self.id_mr} with body {body} and position {pos_obj}")
-            try:
-                self.mr.discussions.create({'body': body, 'position': pos_obj})
-            except Exception as e:
-                try:
-                    # fallback - create a general note on the file in the MR
-                    if 'suggestion_orig_location' in original_suggestion:
-                        line_start = original_suggestion['suggestion_orig_location']['start_line']
-                        line_end = original_suggestion['suggestion_orig_location']['end_line']
-                        old_code_snippet = original_suggestion['prev_code_snippet']
-                        new_code_snippet = original_suggestion['new_code_snippet']
-                        content = original_suggestion['suggestion_summary']
-                        label = original_suggestion['category']
-                        if 'score' in original_suggestion:
-                            score = original_suggestion['score']
-                        else:
-                            score = 7
-                    else:
-                        line_start = original_suggestion['relevant_lines_start']
-                        line_end = original_suggestion['relevant_lines_end']
-                        old_code_snippet = original_suggestion['existing_code']
-                        new_code_snippet = original_suggestion['improved_code']
-                        content = original_suggestion['suggestion_content']
-                        label = original_suggestion['label']
-                        score = original_suggestion.get('score', 7)
-
-                    if hasattr(self, 'main_language'):
-                        language = self.main_language
-                    else:
-                        language = ''
-                    link = self.get_line_link(relevant_file, line_start, line_end)
-                    body_fallback =f"**Suggestion:** {content} [{label}, importance: {score}]\n\n"
-                    body_fallback +=f"\n\n<details><summary>[{target_file.filename} [{line_start}-{line_end}]]({link}):</summary>\n\n"
-                    body_fallback += f"\n\n___\n\n`(Cannot implement directly - GitLab API allows committable suggestions strictly on MR diff lines)`"
-                    body_fallback+="</details>\n\n"
-                    diff_patch = difflib.unified_diff(old_code_snippet.split('\n'),
-                                                new_code_snippet.split('\n'), n=999)
-                    patch_orig = "\n".join(diff_patch)
-                    patch = "\n".join(patch_orig.splitlines()[5:]).strip('\n')
-                    diff_code = f"\n\n```diff\n{patch.rstrip()}\n```"
-                    body_fallback += diff_code
-
-                    # Create a general note on the file in the MR
-                    self.mr.notes.create({
-                        'body': body_fallback,
-                        'position': {
-                            'base_sha': diff.base_commit_sha,
-                            'start_sha': diff.start_commit_sha,
-                            'head_sha': diff.head_commit_sha,
-                            'position_type': 'text',
-                            'file_path': f'{target_file.filename}',
-                        }
-                    })
-                    get_logger().debug(f"Created fallback comment in MR {self.id_mr} with position {pos_obj}")
-
-                    # get_logger().debug(
-                    #     f"Failed to create comment in MR {self.id_mr} with position {pos_obj} (probably not a '+' line)")
-                except Exception as e:
-                    get_logger().exception(f"Failed to create comment in MR {self.id_mr}")
+                line_start = original_suggestion['relevant_lines_start']
+                line_end = original_suggestion['relevant_lines_end']
+                old_code_snippet = original_suggestion['existing_code']
+                new_code_snippet = original_suggestion['improved_code']
+                content = original_suggestion['suggestion_content']
+                label = original_suggestion['label']
+                score = original_suggestion.get('score', 7)
+            link = self.get_line_link(relevant_file, line_start, line_end)
+            body_fallback = f"**Suggestion:** {content} [{label}, importance: {score}]\n\n"
+            body_fallback += (
+                f"\n\n<details><summary>[{target_file.filename} [{line_start}-{line_end}]]({link}):</summary>\n\n"
+            )
+            body_fallback += (
+                "\n\n___\n\n`(Cannot implement directly - GitLab API allows committable suggestions "
+                "strictly on MR diff lines)`</details>\n\n"
+            )
+            diff_patch = difflib.unified_diff(old_code_snippet.split('\n'), new_code_snippet.split('\n'), n=999)
+            patch_orig = "\n".join(diff_patch)
+            patch = "\n".join(patch_orig.splitlines()[5:]).strip('\n')
+            body_fallback += f"\n\n```diff\n{patch.rstrip()}\n```"
+            note = self.mr.notes.create({
+                'body': body_fallback,
+                'position': {
+                    'base_sha': position.get('base_sha'),
+                    'start_sha': position.get('start_sha'),
+                    'head_sha': position.get('head_sha'),
+                    'position_type': 'text',
+                    'file_path': f'{target_file.filename}',
+                }
+            })
+            get_logger().debug(f"Created fallback comment in MR {self.id_mr} with position {position}")
+            return note
+        except Exception:
+            get_logger().exception(f"Failed to create comment in MR {self.id_mr}")
+            return None
 
     def get_relevant_diff(self, relevant_file: str, relevant_line_in_file: str) -> Optional[dict]:
-        _changes = self.mr.changes()  # dict
+        """Return the diff version matching this MR's current/latest state.
+
+        `mr.changes()` always reflects the latest version, so a match here
+        never actually depends on which historical diff version is being
+        looked at -- the old code looped over every diff GitLab has ever
+        recorded (`mr.diffs.list`) re-running the same file/line check each
+        time, which either matched on the first iteration or fell through to
+        a fallback. That redundant loop is removed; the only real question is
+        whether the given file/line is present in the current changes (kept
+        as a debug-log signal), and the answer is always `self.last_diff`
+        (the newest diff version -- see `_set_merge_request`).
+        """
+        _changes = self.mr.changes()
         _changes['changes'] = self._expand_submodule_changes(_changes.get('changes', []))
-        changes = _changes
-        if not changes:
+        if not _changes:
             get_logger().error('No changes found for the merge request.')
             return None
-        all_diffs = self.mr.diffs.list(get_all=True)
-        if not all_diffs:
-            get_logger().error('No diffs found for the merge request.')
-            return None
-        for diff in all_diffs:
-            for change in changes['changes']:
-                if change['new_path'] == relevant_file and relevant_line_in_file in change['diff']:
-                    return diff
+        found = any(
+            change['new_path'] == relevant_file and relevant_line_in_file in change['diff']
+            for change in _changes['changes']
+        )
+        if not found:
             get_logger().debug(
                 f'No relevant diff found for {relevant_file} {relevant_line_in_file}. Falling back to last diff.')
-        return self.last_diff  # fallback to last_diff if no relevant diff is found
+        return self.last_diff
 
     def publish_code_suggestions(self, code_suggestions: list) -> bool:
         for suggestion in code_suggestions:
@@ -692,6 +749,225 @@ class GitLabProvider(GitProvider):
 
         # note that we publish suggestions one-by-one. so, if one fails, the rest will still be published
         return True
+
+    @staticmethod
+    def _extract_discussion_ids(created):
+        """Return (discussion_id, note_id) from a python-gitlab create() result.
+
+        A discussion object exposes ``.id`` (the thread hash) and
+        ``.attributes['notes']``; a plain note object (used by the fallback
+        path) only exposes ``.id``.
+        """
+        if created is None:
+            return None, None
+        discussion_id = getattr(created, "id", None)
+        attrs = getattr(created, "attributes", None)
+        notes = attrs.get("notes") if isinstance(attrs, dict) else None
+        if notes:
+            note_id = (notes[0] or {}).get("id")
+            return discussion_id, note_id
+        return None, discussion_id
+
+    def _find_discussion_by_marker(self, marker: str):
+        if not marker:
+            return None
+        try:
+            for discussion in self.mr.discussions.list(get_all=True):
+                notes = (getattr(discussion, "attributes", {}) or {}).get("notes", [])
+                if any(marker in str((note or {}).get("body") or "") for note in notes):
+                    return discussion
+        except Exception as exc:
+            get_logger().warning(
+                f"Could not reconcile inline suggestion marker in MR {self.id_mr}: "
+                f"{self._sanitize_provider_error(exc)}"
+            )
+        return None
+
+    def _find_note_by_marker(self, marker: str):
+        if not marker:
+            return None
+        try:
+            for note in self.mr.notes.list(get_all=True):
+                body = getattr(note, "body", None)
+                if body is None:
+                    body = (getattr(note, "attributes", {}) or {}).get("body", "")
+                if marker in str(body or ""):
+                    return note
+        except Exception as exc:
+            get_logger().warning(
+                f"Could not reconcile fallback suggestion marker in MR {self.id_mr}: "
+                f"{self._sanitize_provider_error(exc)}"
+            )
+        return None
+
+    def _published_inline_result(self, suggestion_id, created, positions: list[dict]) -> dict | None:
+        discussion_id, note_id = self._extract_discussion_ids(created)
+        if not discussion_id:
+            return None
+        return {
+            "suggestion_id": suggestion_id,
+            "discussion_id": discussion_id,
+            "note_id": note_id,
+            "publish_status": "published",
+            "skip_reason": "",
+            "provider_error": "",
+            "positions": positions,
+            "attempt_count": len(positions),
+        }
+
+    def _publish_one_inline_suggestion(self, suggestion: dict) -> dict:
+        suggestion_id = suggestion.get("suggestion_id")
+        marker = str(suggestion.get("idempotency_marker") or "")
+        positions: list[dict] = []
+        base_result = {
+            "suggestion_id": suggestion_id,
+            "discussion_id": None,
+            "note_id": None,
+            "publish_status": "failed",
+            "skip_reason": "native_inline_rejected",
+            "provider_error": "",
+            "positions": positions,
+            "attempt_count": 0,
+        }
+        fallback_body = str(suggestion.get("fallback_body") or "")
+        fallback_enabled = bool(get_settings().get(
+            "pr_code_suggestions.inline_publish_fallback_comment", True,
+        ))
+        existing = self._find_discussion_by_marker(marker)
+        reconciled = self._published_inline_result(suggestion_id, existing, positions)
+        if reconciled:
+            return reconciled
+        if fallback_enabled and fallback_body and marker:
+            existing_note = self._find_note_by_marker(marker)
+            existing_note_id = getattr(existing_note, "id", None) if existing_note is not None else None
+            if existing_note_id:
+                base_result.update(
+                    note_id=existing_note_id,
+                    publish_status="fallback_published",
+                    skip_reason="native_inline_rejected",
+                )
+                return base_result
+
+        relevant_file = str(suggestion.get("relevant_file") or "")
+        relevant_lines_start = int(suggestion["relevant_lines_start"])
+        relevant_lines_end = int(suggestion["relevant_lines_end"])
+        retry_limit = min(1, max(0, int(get_settings().get(
+            "pr_code_suggestions.inline_publish_retry_limit", 1,
+        ))))
+        provider_error = ""
+        skip_reason = "native_inline_rejected"
+        for attempt in range(1, retry_limit + 2):
+            target_file = next(
+                (file for file in self.get_diff_files() if file.filename == relevant_file),
+                None,
+            )
+            position = {}
+            error = ""
+            created = None
+            if target_file is None:
+                error = "file_not_in_diff"
+                skip_reason = error
+            else:
+                lines = target_file.head_file.splitlines()
+                if relevant_lines_start <= 0 or relevant_lines_start > len(lines):
+                    error = "line_out_of_range"
+                    skip_reason = error
+                else:
+                    suggestion_range = relevant_lines_end - relevant_lines_start
+                    body = str(suggestion.get("body") or "").replace(
+                        "```suggestion", f"```suggestion:-0+{suggestion_range}",
+                    )
+                    relevant_line = lines[relevant_lines_start - 1]
+                    created, position, error = self._create_native_inline(
+                        body,
+                        "addition",
+                        relevant_file,
+                        relevant_line,
+                        -1,
+                        target_file,
+                        relevant_lines_start + 1,
+                    )
+            positions.append({"attempt": attempt, "position": position, "error": error})
+            published = self._published_inline_result(suggestion_id, created, positions)
+            if published:
+                return published
+            existing = self._find_discussion_by_marker(marker)
+            reconciled = self._published_inline_result(suggestion_id, existing, positions)
+            if reconciled:
+                return reconciled
+            provider_error = error or "GitLab did not return a discussion ID"
+            if attempt > retry_limit:
+                break
+            try:
+                self.refresh_merge_request_diff()
+            except Exception as exc:
+                provider_error = self._sanitize_provider_error(exc)
+                break
+            existing = self._find_discussion_by_marker(marker)
+            reconciled = self._published_inline_result(suggestion_id, existing, positions)
+            if reconciled:
+                return reconciled
+
+        base_result.update(
+            skip_reason=skip_reason,
+            provider_error=provider_error,
+            attempt_count=len(positions),
+        )
+        if fallback_enabled and fallback_body and marker:
+            note = self._find_note_by_marker(marker)
+            fallback_error = ""
+            if note is None:
+                try:
+                    note = self.publish_comment(fallback_body)
+                except Exception as exc:
+                    fallback_error = self._sanitize_provider_error(exc)
+                    note = self._find_note_by_marker(marker)
+            note_id = getattr(note, "id", None) if note is not None else None
+            if note_id:
+                base_result.update(
+                    note_id=note_id,
+                    publish_status="fallback_published",
+                    skip_reason="native_inline_rejected",
+                )
+                return base_result
+            if fallback_error:
+                base_result["provider_error"] = (
+                    f"{provider_error}; fallback: {fallback_error}" if provider_error else fallback_error
+                )
+        get_logger().info(
+            f"Inline suggestion {suggestion_id} failed for {relevant_file} in MR {self.id_mr}; "
+            f"attempts={len(positions)}, reason={skip_reason}, error={base_result['provider_error']}"
+        )
+        return base_result
+
+    def publish_inline_suggestions(self, code_suggestions: list) -> list:
+        """Publish committable inline suggestions and return per-item ids.
+
+        Mirrors :meth:`publish_code_suggestions` placement, but captures the
+        created GitLab discussion/note so the caller can track the thread. Each
+        result is a dict with keys ``suggestion_id``, ``discussion_id``,
+        ``note_id``, ``publish_status`` and ``skip_reason``.
+        """
+        results = []
+        for suggestion in code_suggestions:
+            try:
+                results.append(self._publish_one_inline_suggestion(suggestion))
+            except Exception as exc:
+                error = self._sanitize_provider_error(exc)
+                get_logger().warning(
+                    f"Could not publish inline suggestion {suggestion.get('suggestion_id')}: {error}"
+                )
+                results.append({
+                    "suggestion_id": suggestion.get("suggestion_id"),
+                    "discussion_id": None,
+                    "note_id": None,
+                    "publish_status": "failed",
+                    "skip_reason": "exception",
+                    "provider_error": error,
+                    "positions": [],
+                    "attempt_count": 0,
+                })
+        return results
 
     def publish_file_comments(self, file_comments: list) -> bool:
         pass
@@ -773,6 +1049,29 @@ class GitLabProvider(GitProvider):
     def get_pr_branch(self):
         return self.mr.source_branch
 
+    def get_pr_target_branch(self) -> str:
+        return str(getattr(self.mr, "target_branch", "") or "")
+
+    def get_pr_target_branch_sha(self) -> str:
+        target_branch = self.get_pr_target_branch()
+        if not target_branch:
+            return ""
+        project = self.gl.projects.get(self.id_project)
+        branch = project.branches.get(target_branch)
+        commit = getattr(branch, "commit", None)
+        if isinstance(commit, dict):
+            return str(commit.get("id") or commit.get("sha") or "")
+        return str(getattr(commit, "id", "") or getattr(commit, "sha", "") or "")
+
+    def get_file_content_at_ref(self, file_path: str, ref: str) -> str | None:
+        try:
+            file_obj = self.gl.projects.get(self.id_project).files.get(file_path=file_path, ref=ref)
+            return decode_if_bytes(file_obj.decode())
+        except GitlabGetError as exc:
+            if getattr(exc, "response_code", None) == 404:
+                return None
+            raise
+
     def get_pr_owner_id(self) -> str | None:
         if not self.gitlab_url or 'gitlab.com' in self.gitlab_url:
             if not self.id_project:
@@ -782,6 +1081,24 @@ class GitLabProvider(GitProvider):
         host = urlparse(self.gitlab_url).hostname
         return host
 
+    def get_diff_refs(self) -> Optional[dict]:
+        """Return frozen base/head/start shas for the current merge request.
+
+        These come from GitLab's ``diff_refs`` and pin the exact commits the
+        review was produced against, enabling later replay via the Compare API.
+        """
+        try:
+            refs = getattr(self.mr, "diff_refs", None)
+            if isinstance(refs, dict):
+                return {
+                    "base_sha": refs.get("base_sha"),
+                    "head_sha": refs.get("head_sha"),
+                    "start_sha": refs.get("start_sha"),
+                }
+        except Exception as e:
+            get_logger().warning(f"Failed to get diff refs for MR {self.id_mr}: {e}")
+        return None
+
     def get_pr_description_full(self):
         return self.mr.description
 
@@ -790,8 +1107,14 @@ class GitLabProvider(GitProvider):
 
     def get_repo_settings(self):
         try:
-            main_branch = self.gl.projects.get(self.id_project).default_branch
-            contents = self.gl.projects.get(self.id_project).files.get(file_path='.pr_agent.toml', ref=main_branch).decode()
+            proj = self.gl.projects.get(self.id_project)
+            try:
+                contents = proj.files.get(file_path='.pr_agent.toml', ref=self.mr.source_branch).decode()
+                return contents
+            except Exception:
+                pass
+            main_branch = proj.default_branch
+            contents = proj.files.get(file_path='.pr_agent.toml', ref=main_branch).decode()
             return contents
         except Exception:
             return ""
@@ -799,12 +1122,11 @@ class GitLabProvider(GitProvider):
     def get_workspace_name(self):
         return self.id_project.split('/')[0]
 
-    def add_eyes_reaction(self, issue_comment_id: int, disable_eyes: bool = False) -> Optional[int]:
-        if disable_eyes:
-            return None
+    def add_reaction(self, issue_comment_id: int, emoji_name: str) -> Optional[int]:
+        """Add an award emoji reaction (e.g. 'thumbsup', 'eyes') to a comment."""
         try:
             if not self.id_mr:
-                get_logger().warning("Cannot add eyes reaction: merge request ID is not set.")
+                get_logger().warning(f"Cannot add {emoji_name} reaction: merge request ID is not set.")
                 return None
 
             mr = self.gl.projects.get(self.id_project).mergerequests.get(self.id_mr)
@@ -814,13 +1136,39 @@ class GitLabProvider(GitProvider):
                 get_logger().warning(f"Comment with ID {issue_comment_id} not found in merge request {self.id_mr}.")
                 return None
 
-            award_emoji = comment.awardemojis.create({
-                'name': 'eyes'
-            })
+            award_emoji = comment.awardemojis.create({'name': emoji_name})
             return award_emoji.id
         except Exception as e:
-            get_logger().warning(f"Failed to add eyes reaction, error: {e}")
+            get_logger().warning(f"Failed to add {emoji_name} reaction, error: {e}")
             return None
+
+    def set_commit_status(self, sha: str, state: str, context: str,
+                          description: str = "", target_url: Optional[str] = None) -> bool:
+        """Set a GitLab commit status (build status) on the given commit SHA.
+
+        Used by the mandatory-feedback gate to block/unblock merge. state is one
+        of 'pending' | 'success' | 'failed'. Never raises; returns False on error.
+        """
+        try:
+            if not sha:
+                get_logger().warning("Cannot set commit status: empty sha.")
+                return False
+            payload = {"state": state, "name": context}
+            if description:
+                payload["description"] = description
+            if target_url:
+                payload["target_url"] = target_url
+            commit = self.gl.projects.get(self.id_project).commits.get(sha, lazy=True)
+            commit.statuses.create(payload)
+            return True
+        except Exception as e:
+            get_logger().warning(f"Failed to set commit status {state} on {sha}: {e}")
+            return False
+
+    def add_eyes_reaction(self, issue_comment_id: int, disable_eyes: bool = False) -> Optional[int]:
+        if disable_eyes:
+            return None
+        return self.add_reaction(issue_comment_id, 'eyes')
 
     def remove_reaction(self, issue_comment_id: int, reaction_id: str) -> bool:
         try:

@@ -732,9 +732,25 @@ class GithubProvider(GitProvider):
 
     def get_repo_settings(self):
         try:
-            # contents = self.repo_obj.get_contents(".pr_agent.toml", ref=self.pr.head.sha).decoded_content
+            if hasattr(self, "pr") and self.pr and getattr(self.pr, "head", None):
+                head_repo = getattr(self.pr.head, "repo", None)
+                if head_repo is not None:
+                    try:
+                        contents = head_repo.get_contents(".pr_agent.toml", ref=self.pr.head.sha).decoded_content
+                        return contents
+                    except Exception:
+                        pass
+                    try:
+                        contents = head_repo.get_contents(".pr_agent.toml", ref=self.pr.head.ref).decoded_content
+                        return contents
+                    except Exception:
+                        pass
+                try:
+                    contents = self.repo_obj.get_contents(".pr_agent.toml", ref=self.pr.head.sha).decoded_content
+                    return contents
+                except Exception:
+                    pass
 
-            # more logical to take 'pr_agent.toml' from the default branch
             contents = self.repo_obj.get_contents(".pr_agent.toml").decoded_content
             return contents
         except Exception:

@@ -79,6 +79,13 @@ class BitbucketProvider(GitProvider):
 
     def get_repo_settings(self):
         try:
+            source_branch = getattr(self.pr, "source_branch", None)
+            if source_branch:
+                url = (f"https://api.bitbucket.org/2.0/repositories/{self.workspace_slug}/{self.repo_slug}/src/"
+                       f"{source_branch}/.pr_agent.toml")
+                response = requests.request("GET", url, headers=self.headers)
+                if response.status_code != 404:
+                    return response.text.encode('utf-8')
             url = (f"https://api.bitbucket.org/2.0/repositories/{self.workspace_slug}/{self.repo_slug}/src/"
                    f"{self.pr.destination_branch}/.pr_agent.toml")
             response = requests.request("GET", url, headers=self.headers)

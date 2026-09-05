@@ -1,3 +1,6 @@
+from contextlib import contextmanager
+from contextvars import ContextVar
+
 from starlette_context import context
 
 from pr_agent.config_loader import get_settings
@@ -26,8 +29,22 @@ _GIT_PROVIDERS = {
     'gitea': GiteaProvider
 }
 
+_GIT_PROVIDER_FACTORY = ContextVar("git_provider_factory", default=None)
+
+
+@contextmanager
+def git_provider_factory_context(factory):
+    token = _GIT_PROVIDER_FACTORY.set(factory)
+    try:
+        yield
+    finally:
+        _GIT_PROVIDER_FACTORY.reset(token)
+
 
 def get_git_provider():
+    override = _GIT_PROVIDER_FACTORY.get()
+    if override:
+        return override
     try:
         provider_id = get_settings().config.git_provider
     except AttributeError as e:
@@ -41,6 +58,10 @@ def get_git_provider_with_context(pr_url) -> GitProvider:
     """
     Get a GitProvider instance for the given PR URL. If the GitProvider instance is already in the context, return it.
     """
+
+    override = _GIT_PROVIDER_FACTORY.get()
+    if override:
+        return override(pr_url)
 
     is_context_env = None
     try:
