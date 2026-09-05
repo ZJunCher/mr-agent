@@ -7,6 +7,12 @@ The tool can be triggered automatically every time a new PR is [opened](../usage
 /improve
 ```
 
+### 大 MR 的 Map-Reduce 建议生成
+
+`/improve` 与 `/review` 共用同一个 Diff chunk 计划。旧的 `max_number_of_calls` 和 `large_patch_policy = "clip"` 只在关闭新能力时作为兼容路径；启用 `[large_mr_review]` 后，它们不会再导致超过固定调用数的文件或单个大文件尾部被静默排除。
+
+每个 chunk 独立生成结构化建议，随后继续执行现有评分阈值、场景校验、代码定位和修复流水线。Reducer 按文件、行范围和建议内容去重。系统单独记录 expected/completed/missing Diff 单元；任何未覆盖单元都会使结果变成 partial，默认 fail-closed 时不发布普通建议，避免把“未处理”误解成“没有问题”。配置项与 `/review` 的 `[large_mr_review]` 完全相同。
+
 ## How it looks
 
 === "Suggestions Overview"

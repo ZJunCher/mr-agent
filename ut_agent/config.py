@@ -33,8 +33,18 @@ if MODEL_FAILURE_COOLDOWN_SECONDS <= 0:
     raise ValueError("llm.model_failure_cooldown_seconds must be positive")
 if MODEL_PROBE_LEASE_SECONDS <= 0:
     raise ValueError("llm.model_probe_lease_seconds must be positive")
-API_KEY = os.environ.get("UT_AGENT_API_KEY") or os.environ.get("OPENAI_KEY") or _llm.get("api_key", "")
-BASE_URL = os.environ.get("UT_AGENT_API_BASE") or os.environ.get("OPENAI_API_BASE") or _llm.get("base_url", "")
+API_KEY = (
+    os.environ.get("UT_AGENT_API_KEY")
+    or os.environ.get("OPENAI__KEY")
+    or os.environ.get("OPENAI_KEY")
+    or _llm.get("api_key", "")
+)
+BASE_URL = (
+    os.environ.get("UT_AGENT_API_BASE")
+    or os.environ.get("OPENAI__API_BASE")
+    or os.environ.get("OPENAI_API_BASE")
+    or _llm.get("base_url", "")
+)
 DEFAULT_TEMPERATURE = _llm.get("temperature", 0.2)
 HERMES_API_MODE = _llm.get("hermes_api_mode", "anthropic_messages")
 

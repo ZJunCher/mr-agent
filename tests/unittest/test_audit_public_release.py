@@ -50,6 +50,7 @@ def test_scan_tree_allows_documented_safe_examples(tmp_path: Path) -> None:
     repo.mkdir()
     _init_repo(repo)
     (repo / ".secrets_template.toml").write_text('api_key = "your_api_key"\n', encoding="utf-8")
+    (repo / ".env.example").write_text("TOKEN=your_token\n", encoding="utf-8")
     (repo / "docs.md").write_text("https://gitlab.example.com/group/project\n", encoding="utf-8")
     (repo / "test.cpp").write_text("testing::internal::CaptureStdout();\n", encoding="utf-8")
 

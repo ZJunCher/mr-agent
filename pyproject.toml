@@ -3,16 +3,16 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "pr-agent"
-version = "0.3.1"
+name = "mr-agent"
+version = "0.1.0"
 
 authors = [{ name = "QodoAI", email = "ofir.f@qodo.ai" }]
 
 maintainers = [
-  { name = "Ofir Friedman", email = "ofir.f@qodo.ai" },
+  { name = "ZJunCher" },
 ]
 
-description = "QodoAI PR-Agent aims to help efficiently review and handle pull requests, by providing AI feedbacks and suggestions."
+description = "Multi-agent GitLab MR code review, governance, and CI self-healing."
 readme = "README.md"
 requires-python = ">=3.12"
 keywords = ["AI", "Agents", "Pull Request", "Automation", "Code Review"]
@@ -29,8 +29,8 @@ dynamic = ["dependencies"]
 dependencies = { file = ["requirements.txt"] }
 
 [project.urls]
-"Homepage" = "https://github.com/qodo-ai/pr-agent"
-"Documentation" = "https://qodo-merge-docs.qodo.ai/"
+"Homepage" = "https://github.com/ZJunCher/mr-agent"
+"Documentation" = "https://github.com/ZJunCher/mr-agent#readme"
 
 [tool.setuptools]
 include-package-data = true
@@ -43,6 +43,7 @@ include = [
 
 [project.scripts]
 pr-agent = "pr_agent.cli:run"
+mr-agent = "pr_agent.cli:run"
 
 [tool.ruff]
 line-length = 120

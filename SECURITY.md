@@ -1,64 +1,26 @@
 # Security Policy
 
-PR-Agent is an open-source tool to help efficiently review and handle pull requests. Qodo Merge is a paid version of PR-Agent, designed for companies and teams that require additional features and capabilities.
+## Supported code
 
-This document describes the security policy of PR-Agent. For Qodo Merge's security policy, see [here](https://qodo-merge-docs.qodo.ai/overview/data_privacy/#qodo-merge).
+Security fixes target the latest commit on the default branch. This repository does not operate a hosted MR-Agent service.
+Deployment operators are responsible for updating their own instances and rotating provider credentials.
 
-## PR-Agent Self-Hosted Solutions
+## Reporting a vulnerability
 
-When using PR-Agent with your OpenAI (or other LLM provider) API key, the security relationship is directly between you and the provider. We do not send your code to Qodo servers.
+Use GitHub's private vulnerability reporting feature for this repository when it is available. If private reporting is not
+enabled, open a minimal issue asking the maintainer for a private contact channel. Do not include exploit details, credentials,
+private repository content, CI logs, or personal data in a public issue.
 
-Types of [self-hosted solutions](https://qodo-merge-docs.qodo.ai/installation):
+A useful report includes the affected revision, deployment mode, impact, reproduction conditions, and a proposed mitigation when
+known. Remove tokens, internal URLs, repository names, and user identifiers from logs before attaching them.
 
-- Locally
-- GitHub integration
-- GitLab integration
-- BitBucket integration
-- Azure DevOps integration
+## Credential handling
 
-## PR-Agent Supported Versions
+- Pass Git provider, model provider, Redis, and Feishu credentials through environment variables or a secret manager.
+- Never bake credentials into container images or commit `.env`, `.secrets.toml`, private keys, logs, or database files.
+- Use separate bot accounts with the minimum API scopes required by the enabled commands.
+- Protect default branches and require CI validation for Agent-generated changes.
+- Revoke and rotate a credential immediately if it appears in Git history, logs, screenshots, or an image layer.
 
-This section outlines which versions of PR-Agent are currently supported with security updates.
-
-### Docker Deployment Options
-
-#### Latest Version
-
-For the most recent updates, use our latest Docker image which is automatically built nightly:
-
-```yaml
-uses: qodo-ai/pr-agent@main
-```
-
-#### Specific Release Version
-
-For a fixed version, you can pin your action to a specific release version. Browse available releases at:
-[PR-Agent Releases](https://github.com/qodo-ai/pr-agent/releases)
-
-For example, to github action:
-
-```yaml
-steps:
-  - name: PR Agent action step
-    id: pragent
-    uses: docker://codiumai/pr-agent:0.26-github_action
-```
-
-#### Enhanced Security with Docker Digest
-
-For maximum security, you can specify the Docker image using its digest:
-
-```yaml
-steps:
-  - name: PR Agent action step
-    id: pragent
-    uses: docker://codiumai/pr-agent@sha256:14165e525678ace7d9b51cda8652c2d74abb4e1d76b57c4a6ccaeba84663cc64
-```
-
-## Reporting a Vulnerability
-
-We take the security of PR-Agent seriously. If you discover a security vulnerability, please report it immediately to:
-
-Email: security@qodo.ai
-
-Please include a description of the vulnerability, steps to reproduce, and the affected PR-Agent version.
+The repository includes `scripts/audit_public_release.py` for a focused source and custom-history check. It supplements provider
+secret scanning and manual review; it is not a complete security audit.

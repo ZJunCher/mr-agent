@@ -1,6 +1,6 @@
-site_name: Qodo Merge (and open-source PR-Agent)
-repo_url: https://github.com/qodo-ai/pr-agent
-repo_name: Qodo-ai/pr-agent
+site_name: MR-Agent
+repo_url: https://github.com/ZJunCher/mr-agent
+repo_name: ZJunCher/mr-agent
 
 nav:
   - Overview:
@@ -20,6 +20,8 @@ nav:
     - Managing Mail Notifications: 'usage-guide/mail_notifications.md'
     - Changing a Model: 'usage-guide/changing_a_model.md'
     - Additional Configurations: 'usage-guide/additional_configurations.md'
+    - Project Review Skill: 'usage-guide/project_review_skill.md'
+    - Native Repair Hybrid Agent: 'usage-guide/native_repair_hybrid_agent.md'
     - Frequently Asked Questions: 'faq/index.md'
     - Qodo Merge Models: 'usage-guide/qodo_merge_models.md'
   - Tools:

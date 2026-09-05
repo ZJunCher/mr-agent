@@ -24,6 +24,8 @@ FORBIDDEN_PATH_PATTERNS = (
     re.compile(r"(^|/).*(resume|auth-qr|credential).*(\.pdf|\.png|\.json)$", re.I),
 )
 
+SAFE_TEMPLATE_PATHS = frozenset({".env.example", "pr_agent/settings/.secrets_template.toml"})
+
 FORBIDDEN_TEXT_PATTERNS = {
     "private-key": re.compile(rb"-----BEGIN (?:RSA |OPENSSH |EC )?PRIVATE KEY-----"),
     "provider-token": re.compile(rb"(?<![A-Za-z0-9_-])(?:sk-|ghp_|github_pat_|glpat-)[A-Za-z0-9_-]{16,}"),
@@ -61,10 +63,11 @@ def _is_binary(content: bytes) -> bool:
 
 def _scan_blob(revision: str, path: str, content: bytes, denylist: tuple[str, ...]) -> list[Finding]:
     findings = []
-    for pattern in FORBIDDEN_PATH_PATTERNS:
-        if pattern.search(path):
-            findings.append(Finding(revision, path, "forbidden-path"))
-            break
+    if path not in SAFE_TEMPLATE_PATHS:
+        for pattern in FORBIDDEN_PATH_PATTERNS:
+            if pattern.search(path):
+                findings.append(Finding(revision, path, "forbidden-path"))
+                break
     if _is_binary(content):
         return findings
     for rule, pattern in FORBIDDEN_TEXT_PATTERNS.items():

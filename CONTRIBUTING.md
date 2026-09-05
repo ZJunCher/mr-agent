@@ -1,38 +1,47 @@
-# Contributing to PR-Agent
+# Contributing to MR-Agent
 
-Thank you for your interest in contributing to the PR-Agent project!
+Contributions are welcome when they keep Agent actions observable, bounded, and verifiable.
 
-## Getting Started
+## Development setup
 
-1. Fork the repository and clone your fork
-2. Install Python 3.10 or higher
-3. Install dependencies (`requirements.txt` and `requirements-dev.txt`)
-4. Create a new branch for your contribution:
-   - For new features: `git checkout -b feature/your-feature-name`
-   - For bug fixes: `git checkout -b fix/issue-description`
-5. Make your changes
-6. Write or update tests as needed
-7. Run tests locally to ensure everything passes
-8. Commit your changes using conventional commit messages
-9. Push to your fork and submit a pull request
+MR-Agent requires Python 3.12 or newer.
 
-## Development Guidelines
+```bash
+python3.12 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+pip install -r requirements-dev.txt
+```
 
-- Keep pull requests focused on a single feature or fix
-- Follow the existing code style and formatting conventions
-- Add unit tests for any new functionality using pytest
-- Ensure test coverage for your changes
-- Update documentation as needed
+Use environment variables or an ignored `pr_agent/settings/.secrets.toml` for local credentials. Do not edit
+`pr_agent/settings/configuration.toml` to add deployment secrets or organization-specific endpoints.
 
-## Pull Request Process
+## Making a change
 
-1. Ensure your PR includes a clear description of the changes
-2. Link any related issues
-3. Update the README.md if needed
-4. Wait for review from maintainers
+1. Create a focused branch such as `feature/<name>` or `fix/<issue>`.
+2. Follow the existing Python style: 120-character lines, Ruff import ordering, and concise English docstrings.
+3. Add tests under the closest matching directory. Unit behavior belongs in `tests/unittest/`; external integrations belong in
+   `tests/integration/` or `tests/e2e_tests/`.
+4. Run the smallest relevant tests while developing, then run the full unit suite before submitting.
+5. Update README or user documentation when behavior, configuration, or deployment changes.
 
-## Questions or Need Help?
+Example commands:
 
-- Join our [Discord community](https://discord.com/channels/1057273017547378788/1126104260430528613) for questions and discussions
-- Check the [documentation](https://qodo-merge-docs.qodo.ai/) for detailed information
-- Report bugs or request features through [GitHub Issues](https://github.com/qodo-ai/pr-agent/issues)
+```bash
+PYTHONPATH=. ./.venv/bin/pytest tests/unittest/test_fix_json_escape_char.py -q
+PYTHONPATH=. ./.venv/bin/pytest tests/unittest -q
+./.venv/bin/ruff check pr_agent ut_agent tests scripts
+PYTHONPATH=. ./.venv/bin/python scripts/audit_public_release.py --root .
+```
+
+External end-to-end tests require provider credentials and test repositories. Do not run them against production projects or
+include their logs in a pull request.
+
+## Pull requests
+
+Keep each pull request small enough to review. Explain the failure mode or user need, the chosen behavior, and the evidence used
+to verify it. Agent workflow changes should cover stale events, retries, duplicate delivery, worker takeover, and terminal-state
+handling when those cases apply.
+
+Use Conventional Commit-style subjects, for example `fix: reject stale pipeline results`. Never commit API keys, access tokens,
+private URLs, personal data, generated databases, or runtime workspaces.

@@ -8,6 +8,24 @@ The tool can be triggered automatically every time a new PR is [opened](../usage
 /review
 ```
 
+### 大 MR 完整覆盖
+
+当完整 Diff 无法与 Prompt 一起放入一次模型请求时，`/review` 不再静默省略后面的文件。系统按文件和 Unified Diff hunk 保持语义边界，再依据实际 Token 预算生成多个 chunk；只有单个 hunk 本身仍然过大时，才会在完整 Diff 行之间继续拆分。各 chunk 继续使用相同的 Review Prompt、Project Skill、模型配置和 YAML 解析器，最终结果按文件、行号和建议内容确定性合并去重。
+
+程序根据 chunk 计划计算覆盖率，不依赖模型声称“已经看完”。只有全部可审查 hunk 都由成功且可解析的调用处理时，状态才是 complete。任何 chunk 失败、单行超限或超过 `max_chunks` 都会产生明确的 partial/failed 状态；默认 `fail_closed = true`，因此不会把局部结果包装成完整审查。
+
+```toml
+[large_mr_review]
+enabled = true
+output_buffer_tokens = 1500
+chunk_metadata_tokens = 256
+max_chunks = 20
+max_concurrency = 4
+fail_closed = true
+```
+
+`output_buffer_tokens` 是为结构化回答预留的上下文空间，并不是把输入和输出按同一种计费方式计算。模型上下文有总上限；如果输入占满窗口，即使 Diff 全部发送，模型也没有足够空间返回合法 YAML。
+
 Note that the main purpose of the `review` tool is to provide the **PR reviewer** with useful feedback and insights. The PR author, in contrast, may prefer to save time and focus on the output of the [improve](./improve.md) tool, which provides actionable code suggestions.
 
 (Read more about the different personas in the PR process and how Qodo Merge aims to assist them in our [blog](https://www.codium.ai/blog/understanding-the-challenges-and-pain-points-of-the-pull-request-cycle/))
