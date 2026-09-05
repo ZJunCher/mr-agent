@@ -1,0 +1,32 @@
+[llm]
+model = "anthropic/claude-sonnet-5"
+fallback_models = ["anthropic/claude-opus-4-8", "anthropic/claude-opus-4-6"]
+model_failure_cooldown_seconds = 300
+model_probe_lease_seconds = 30
+api_key = ""
+base_url = ""
+temperature = 0.2
+hermes_api_mode = "anthropic_messages"
+
+[agent]
+test_mode = false
+
+[repair]
+# backend 决定 pipeline_failed 场景如何产生工作区 diff：
+#   - hermes: 委托 Hermes CLI 子进程（回退选项）
+#   - native: 由 LangGraph Agent 直接调用受控编码工具
+backend = "native"
+ci_log_read_max_lines = 200
+ci_log_read_max_bytes = 32768
+repo_search_max_results = 50
+diff_view_max_lines = 600
+
+[repair.validation]
+default_timeout_seconds = 600
+max_timeout_seconds = 1200
+max_output_chars = 20000
+
+[repair.validation.profiles."example-group/example-project"]
+test_argv = ["python", "-m", "pytest", "tests/unittest", "-q"]
+working_directory = "."
+timeout_seconds = 900
