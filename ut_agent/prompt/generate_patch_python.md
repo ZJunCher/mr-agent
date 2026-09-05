@@ -49,9 +49,9 @@ class TestWithMock:
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {"key": "value"}
-        
+
         mocker.patch("module.foo.requests.get", return_value=mock_response)
-        
+
         result = foo.fetch_data("http://example.com")
         assert result == {"key": "value"}
 

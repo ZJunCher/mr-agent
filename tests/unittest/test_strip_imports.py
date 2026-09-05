@@ -37,4 +37,3 @@ def test_strip_js_third_party_imports():
     assert any("express" in l for l in lines) is False
     assert any("import localMod from './local/mod'" in l for l in lines)
     assert any("import internal from 'src/utils'" in l for l in lines)
-

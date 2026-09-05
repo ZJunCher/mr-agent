@@ -9,7 +9,7 @@ async def handle_gitlab_webhook_event(data, settings):
     """
     try:
         object_kind = data.get('object_kind')
-        
+
         # Only care about MR events and comments
         if object_kind not in ['merge_request', 'note']:
             return
@@ -20,7 +20,7 @@ async def handle_gitlab_webhook_event(data, settings):
             return
 
         sender = data.get("user", {}).get("username", "unknown")
-        
+
         # 1) 获取 MR 基本信息
         project_id = data.get('project', {}).get('id')
         mr_iid = None
@@ -65,7 +65,7 @@ async def handle_gitlab_webhook_event(data, settings):
             if len(comment_body) < 20 and "..." in comment_body:
                 get_logger().info(f"Skipping status message from bot: {comment_body}")
                 return
-            
+
             # 尝试找到触发该指令的人，如果找不到则发给 MR 作者
             command_sender = await fetch_command_sender(project_id, mr_iid, settings)
             if command_sender:
@@ -113,7 +113,7 @@ async def handle_gitlab_webhook_event(data, settings):
         # 5) 发送给飞书
         get_logger().info(f"Sending Feishu markdown to recipient: {recipient}")
         await client.send_markdown_to_user(recipient, comment_body)
-        
+
     except Exception as e:
         get_logger().error(f"Error handling Feishu webhook event: {e}")
 
@@ -191,22 +191,22 @@ def _get_author_sync(data, settings):
     try:
         url = settings.get("GITLAB.URL", "https://gitlab.com")
         token = settings.gitlab.personal_access_token
-        
+
         # We need a token to query API
         if not token:
             get_logger().warning("No GitLab token available for API query")
             return None
 
         gl = gitlab.Gitlab(url, private_token=token)
-        
+
         project_id = data.get('project', {}).get('id')
-        
+
         iid = None
         if 'merge_request' in data:
             iid = data['merge_request'].get('iid')
         elif 'object_attributes' in data and data.get('object_kind') == 'merge_request':
             iid = data['object_attributes'].get('iid')
-            
+
         if project_id and iid:
             project = gl.projects.get(project_id)
             mr = project.mergerequests.get(iid)

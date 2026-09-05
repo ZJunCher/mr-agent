@@ -20,17 +20,17 @@ async def test_feishu_notification_open_mr():
             "title": "Test MR"
         }
     }
-    
+
     settings = MagicMock()
-    
+
     with patch("pr_agent.feishu.webhook_handler.FeishuClient") as MockClient:
         client_instance = MockClient.return_value
         client_instance.app_id = "fake_id"
         client_instance.app_secret = "fake_secret"
         client_instance.notify_user = AsyncMock()
-        
+
         await handle_gitlab_webhook_event(data, settings)
-        
+
         # Verify
         client_instance.notify_user.assert_called_once()
         args = client_instance.notify_user.call_args[0]
@@ -51,19 +51,19 @@ async def test_feishu_notification_comment_mr():
         },
         "project": {"id": 100}
     }
-    
+
     settings = MagicMock()
     settings.get.return_value = "https://gitlab.com"
     settings.gitlab.personal_access_token = "fake_token"
-    
+
     with patch("pr_agent.feishu.webhook_handler.FeishuClient") as MockClient, \
          patch("gitlab.Gitlab") as MockGitlab:
-        
+
         client_instance = MockClient.return_value
         client_instance.app_id = "fake_id"
         client_instance.app_secret = "fake_secret"
         client_instance.notify_user = AsyncMock()
-        
+
         # Mock GitLab API
         gl_instance = MockGitlab.return_value
         project = MagicMock()
@@ -71,9 +71,9 @@ async def test_feishu_notification_comment_mr():
         mr.author = {"username": "author_user"}
         project.mergerequests.get.return_value = mr
         gl_instance.projects.get.return_value = project
-        
+
         await handle_gitlab_webhook_event(data, settings)
-        
+
         # Verify
         client_instance.notify_user.assert_called_once()
         args = client_instance.notify_user.call_args[0]

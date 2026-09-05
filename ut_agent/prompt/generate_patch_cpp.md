@@ -49,7 +49,7 @@ TEST_F(FooTest, test_with_mock) {
     MockDependency mock_dep;
     EXPECT_CALL(mock_dep, MethodName(testing::_, testing::_))
         .WillOnce(testing::Return(expected_value));
-    
+
     Foo foo(&mock_dep);
     auto result = foo.DoSomething();
     EXPECT_EQ(result, expected_value);

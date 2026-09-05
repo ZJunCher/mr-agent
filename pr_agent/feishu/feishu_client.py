@@ -61,7 +61,7 @@ class FeishuClient:
                     if data.get("code") != 0:
                         get_logger().error(f"Feishu token error: {data}")
                         return None
-                    
+
                     self.token = data["tenant_access_token"]
                     self.token_expire_time = time.time() + data["expire"] - 60  # Buffer
                     return self.token
@@ -244,7 +244,7 @@ class FeishuClient:
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json; charset=utf-8"
         }
-        
+
         # Content needs to be a JSON string inside the JSON payload
         msg_content = json.dumps({"text": content})
         payload = {
@@ -521,7 +521,7 @@ class FeishuClient:
         if not feishu_id:
             get_logger().debug(f"No Feishu mapping found for GitLab user: {gitlab_username}")
             return
-        
+
         await self.send_message(feishu_id, message)
 
     async def send_markdown_to_user(self, gitlab_username, markdown_content):
