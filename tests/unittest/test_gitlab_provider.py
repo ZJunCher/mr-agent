@@ -32,6 +32,10 @@ class TestGitLabProvider:
             }.get(key, default)
 
             mock_gitlab_client.projects.get.return_value = mock_project
+            # _set_merge_request needs at least one diff version to pick
+            # last_diff from (max(diffs, key=lambda d: d.id)); a single-item
+            # list needs no real comparisons, so a plain MagicMock id works.
+            mock_project.mergerequests.get.return_value.diffs.list.return_value = [MagicMock(id=1)]
             provider = GitLabProvider("https://gitlab.com/test/repo/-/merge_requests/1")
             provider.gl = mock_gitlab_client
             provider.id_project = "test/repo"
@@ -129,6 +133,32 @@ class TestGitLabProvider:
 
         expected_params = ['file_path', 'branch', 'contents', 'message']
         assert params == expected_params
+
+    def test_project_skill_reads_target_branch_head_by_exact_sha(self, gitlab_provider, mock_project):
+        gitlab_provider.mr.target_branch = "main"
+        mock_project.branches.get.return_value.commit = {"id": "target-sha"}
+        mock_file = MagicMock(ProjectFile)
+        mock_file.decode.return_value = b"skill-content"
+        mock_project.files.get.return_value = mock_file
+
+        target_sha = gitlab_provider.get_pr_target_branch_sha()
+        content = gitlab_provider.get_file_content_at_ref(
+            ".pr_agent/skills/review/skill.toml",
+            target_sha,
+        )
+
+        assert target_sha == "target-sha"
+        mock_project.branches.get.assert_called_once_with("main")
+        mock_project.files.get.assert_called_once_with(
+            file_path=".pr_agent/skills/review/skill.toml",
+            ref="target-sha",
+        )
+        assert content == "skill-content"
+
+    def test_project_skill_missing_file_returns_none(self, gitlab_provider, mock_project):
+        mock_project.files.get.side_effect = GitlabGetError("not found", response_code=404)
+
+        assert gitlab_provider.get_file_content_at_ref(".pr_agent/skills/review/skill.toml", "sha") is None
 
     @pytest.mark.parametrize("content,expected", [
         ("simple text", "simple text"),

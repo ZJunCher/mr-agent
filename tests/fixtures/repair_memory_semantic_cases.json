@@ -1,0 +1,110 @@
+[
+  {
+    "case_id": "exact-cross-project",
+    "kind": "exact",
+    "query": {
+      "project": "sample/service-c",
+      "source_pipeline_id": 101,
+      "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "failure_category": "build",
+      "job_family": "compile",
+      "failure_family": "missing_header",
+      "language": "cpp",
+      "build_system": "cmake",
+      "diagnostic_fingerprint": "fatal error: widget/api.hpp: no such file or directory",
+      "causal_tokens": ["widget/api.hpp", "no such file"]
+    },
+    "relevant_memory_ids": ["memory:global:missing-header"],
+    "forbidden_memory_ids": []
+  },
+  {
+    "case_id": "semantic-unique-ptr",
+    "kind": "semantic",
+    "query": {
+      "project": "sample/service-a",
+      "source_pipeline_id": 102,
+      "source_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "failure_category": "build",
+      "job_family": "compile",
+      "failure_family": "missing_member",
+      "language": "cpp",
+      "build_system": "cmake",
+      "diagnostic_fingerprint": "使用智能指针时编译器找不到 std::unique_ptr",
+      "causal_tokens": ["std::unique_ptr", "智能指针", "编译器"]
+    },
+    "relevant_memory_ids": ["memory:global:memory-header"],
+    "forbidden_memory_ids": ["memory:distractor:ownership"]
+  },
+  {
+    "case_id": "semantic-keyword-distractor",
+    "kind": "semantic",
+    "query": {
+      "project": "sample/service-b",
+      "source_pipeline_id": 103,
+      "source_sha": "cccccccccccccccccccccccccccccccccccccccc",
+      "failure_category": "build",
+      "job_family": "compile",
+      "failure_family": "undefined_symbol",
+      "language": "cpp",
+      "build_system": "cmake",
+      "diagnostic_fingerprint": "undefined reference to widget::create_client()",
+      "causal_tokens": ["undefined reference", "create_client", "linker"]
+    },
+    "relevant_memory_ids": ["memory:global:link-library"],
+    "forbidden_memory_ids": ["memory:distractor:missing-header"]
+  },
+  {
+    "case_id": "project-and-global",
+    "kind": "coverage",
+    "query": {
+      "project": "sample/service-a",
+      "source_pipeline_id": 104,
+      "source_sha": "dddddddddddddddddddddddddddddddddddddddd",
+      "failure_category": "test",
+      "job_family": "unit-test",
+      "failure_family": "test_assertion",
+      "language": "python",
+      "build_system": "pytest",
+      "diagnostic_fingerprint": "assertion failed: expected ready state",
+      "causal_tokens": ["assertion", "ready state"]
+    },
+    "relevant_memory_ids": ["memory:project:ready-state", "memory:global:ready-state"],
+    "forbidden_memory_ids": []
+  },
+  {
+    "case_id": "semantic-mixed-chinese-english",
+    "kind": "semantic",
+    "query": {
+      "project": "sample/service-d",
+      "source_pipeline_id": 105,
+      "source_sha": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "failure_category": "lint",
+      "job_family": "static-check",
+      "failure_family": "type_mismatch",
+      "language": "python",
+      "build_system": "ruff",
+      "diagnostic_fingerprint": "类型检查失败：Argument of type None cannot be assigned to str",
+      "causal_tokens": ["None", "str", "type mismatch"]
+    },
+    "relevant_memory_ids": ["memory:global:optional-value"],
+    "forbidden_memory_ids": []
+  },
+  {
+    "case_id": "disabled-memory-is-excluded",
+    "kind": "negative",
+    "query": {
+      "project": "sample/service-e",
+      "source_pipeline_id": 106,
+      "source_sha": "ffffffffffffffffffffffffffffffffffffffff",
+      "failure_category": "build",
+      "job_family": "compile",
+      "failure_family": "missing_member",
+      "language": "cpp",
+      "build_system": "cmake",
+      "diagnostic_fingerprint": "error: no member named stale_api",
+      "causal_tokens": ["stale_api", "no member"]
+    },
+    "relevant_memory_ids": [],
+    "forbidden_memory_ids": ["memory:disabled:stale-api"]
+  }
+]
