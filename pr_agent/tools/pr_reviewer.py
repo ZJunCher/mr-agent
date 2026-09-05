@@ -1,3 +1,4 @@
+import asyncio
 import copy
 import datetime
 import traceback
@@ -12,17 +13,33 @@ from pr_agent.algo.ai_handlers.litellm_ai_handler import LiteLLMAIHandler
 from pr_agent.algo.pr_processing import (add_ai_metadata_to_diff_files,
                                          get_pr_diff,
                                          retry_with_fallback_models)
+from pr_agent.algo.review_chunking import build_review_chunk_plan, coverage_for_results
+from pr_agent.algo.code_graph.context_expander import ChangedFile, build_related_files_context
 from pr_agent.algo.token_handler import TokenHandler
 from pr_agent.algo.utils import (ModelType, PRReviewHeader,
                                  convert_to_markdown_v2, github_action_output,
                                  load_yaml, show_relevant_configurations)
 from pr_agent.config_loader import get_settings
+from pr_agent.algo.language_router import (
+    detect_language_from_files,
+    get_review_prompt_pairs,
+    improve_prompt_pair_languages,
+    language_scopes_for_mode,
+    merge_review_predictions,
+)
 from pr_agent.git_providers import (get_git_provider,
                                     get_git_provider_with_context)
 from pr_agent.git_providers.git_provider import (IncrementalPR,
                                                  get_main_pr_language)
 from pr_agent.log import get_logger
 from pr_agent.servers.help import HelpMessage
+from pr_agent.suggestions.project_prompt_rules import (
+    EffectiveProjectSkill,
+    ProjectSkillSession,
+    append_project_skill_context,
+    project_skill_should_inject,
+    project_skill_should_load,
+)
 from pr_agent.tools.ticket_pr_compliance_check import (
     extract_and_cache_pr_tickets, extract_tickets)
 
@@ -33,7 +50,8 @@ class PRReviewer:
     """
 
     def __init__(self, pr_url: str, is_answer: bool = False, is_auto: bool = False, args: list = None,
-                 ai_handler: partial[BaseAiHandler,] = LiteLLMAIHandler):
+                 ai_handler: partial[BaseAiHandler,] = LiteLLMAIHandler, *, git_provider=None,
+                 project_skill_session: ProjectSkillSession | None = None):
         """
         Initialize the PRReviewer object with the necessary attributes and objects to review a pull request.
 
@@ -44,14 +62,24 @@ class PRReviewer:
             ai_handler (BaseAiHandler): The AI handler to be used for the review. Defaults to None.
             args (list, optional): List of arguments passed to the PRReviewer class. Defaults to None.
         """
-        self.git_provider = get_git_provider_with_context(pr_url)
+        self.git_provider = git_provider or get_git_provider_with_context(pr_url)
         self.args = args
         self.incremental = self.parse_incremental(args)  # -i command
         if self.incremental and self.incremental.is_incremental:
             self.git_provider.get_incremental_commits(self.incremental)
 
-        self.main_language = get_main_pr_language(
-            self.git_provider.get_languages(), self.git_provider.get_files()
+        self._changed_files = tuple(self.git_provider.get_files())
+        self.main_language = get_main_pr_language(self.git_provider.get_languages(), self._changed_files)
+        self.project_skill_session = project_skill_session or ProjectSkillSession.load(
+            self.git_provider,
+            str(getattr(self.git_provider, "id_project", "") or ""),
+            enabled=project_skill_should_load(),
+        )
+        detected_skill_language = detect_language_from_files(list(self._changed_files))
+        self.project_skill_effective = self.project_skill_session.effective(
+            "review",
+            languages=language_scopes_for_mode(detected_skill_language),
+            files=self._changed_files,
         )
         self.pr_url = pr_url
         self.is_answer = is_answer
@@ -80,6 +108,7 @@ class PRReviewer:
             "description": self.pr_description,
             "language": self.main_language,
             "diff": "",  # empty diff for initial calculation
+            "related_files_context": "",  # empty for initial calculation; populated in _prepare_prediction
             "num_pr_files": self.git_provider.get_num_of_files(),
             "num_max_findings": get_settings().pr_reviewer.num_max_findings,
             "require_score": get_settings().pr_reviewer.require_score_review,
@@ -100,12 +129,22 @@ class PRReviewer:
             'duplicate_prompt_examples': get_settings().config.get('duplicate_prompt_examples', False),
             "date": datetime.datetime.now().strftime('%Y-%m-%d'),
         }
+        self.vars["project_prompt_rules"] = (
+            self.project_skill_effective.render_context() if project_skill_should_inject("review") else ""
+        )
 
+        use_v2_prompts = bool(get_settings().get("pr_reviewer.code_graph.enabled", False))
+        # 2026-07: code_graph.enabled 现在路由到 v3 提示词（曾依次是 v2 → 现在是 v3）
+        review_prompt_key = "pr_review_prompt_v3" if use_v2_prompts else "pr_review_prompt"
+        review_prompt_settings = get_settings().get(review_prompt_key)
+        token_user_prompt = review_prompt_settings.user
+        if self.vars["project_prompt_rules"]:
+            token_user_prompt = f"{token_user_prompt}\n\n{{{{ project_prompt_rules }}}}"
         self.token_handler = TokenHandler(
             self.git_provider.pr,
             self.vars,
-            get_settings().pr_review_prompt.system,
-            get_settings().pr_review_prompt.user
+            review_prompt_settings.system,
+            token_user_prompt,
         )
 
     def parse_incremental(self, args: List[str]):
@@ -154,10 +193,27 @@ class PRReviewer:
 
             await retry_with_fallback_models(self._prepare_prediction, model_type=ModelType.REGULAR)
             if not self.prediction:
+                coverage_failure = getattr(self, "coverage_failure_message", "")
+                if coverage_failure and get_settings().config.publish_output:
+                    self.git_provider.publish_comment(coverage_failure)
                 self.git_provider.remove_initial_comment()
                 return None
 
+            # Run doc-drift detection in parallel with review rendering when enabled.
+            # Result (list or None) is stored on self for _prepare_pr_review to inject.
+            self._doc_drift_kept = None
+            if get_settings().get('doc_drift.enabled', True) and get_settings().get('doc_drift.show_in_review', True):
+                try:
+                    from pr_agent.tools.pr_doc_drift import PRDocDrift
+                    _dd = PRDocDrift(self.pr_url)
+                    self._doc_drift_kept = await _dd.detect()
+                except Exception:
+                    get_logger().exception("doc-drift: review integration failed; row will be omitted.")
+
             pr_review = self._prepare_pr_review()
+            coverage_notice = getattr(self, "coverage_partial_notice", "")
+            if coverage_notice:
+                pr_review = f"{coverage_notice}\n\n{pr_review}"
             get_logger().debug(f"PR output", artifact=pr_review)
 
             should_publish = get_settings().config.publish_output and self._should_publish_review_no_suggestions(pr_review)
@@ -170,6 +226,7 @@ class PRReviewer:
                 return
 
             # publish the review
+            pr_review = self._append_feedback_section(pr_review)
             if get_settings().pr_reviewer.persistent_comment and not self.incremental.is_incremental:
                 final_update_message = get_settings().pr_reviewer.final_update_message
                 self.git_provider.publish_persistent_comment(pr_review,
@@ -186,7 +243,121 @@ class PRReviewer:
     def _should_publish_review_no_suggestions(self, pr_review: str) -> bool:
         return get_settings().pr_reviewer.get('publish_output_no_suggestions', True) or "No major issues detected" not in pr_review
 
+    def _append_feedback_section(self, pr_review: str) -> str:
+        """Append a hidden review_id marker and an optional feedback hint.
+
+        The marker lets a later ``/feedback`` command link the rating back to
+        this specific review. The hint nudges users to rate the review. Both are
+        best-effort and must never break review publishing.
+        """
+        try:
+            import uuid
+            text = pr_review or ""
+            if get_settings().pr_reviewer.get("enable_feedback_hint", True):
+                lang = str(get_settings().config.get("response_language", "en-US")).lower()
+                if lang.startswith("zh"):
+                    text += ("\n\n---\n💬 这次审查对你有帮助吗？回复 `/feedback [1~5] 你的意见（可选）`"
+                             " 帮助我们改进，举例：`/feedback 5` 表示很有用，或 `/feedback 1 你的意见`。")
+                else:
+                    text += ("\n\n---\n💬 Was this review helpful? Reply `/feedback [1-5] (optional comment)`"
+                             " to help us improve. E.g., `/feedback 5` if useful, or `/feedback 1 your comment`.")
+            review_id = uuid.uuid4().hex[:12]
+            text += f"\n\n<!-- pr_agent_review_id: {review_id} -->"
+            self._record_project_skill_usage(review_id)
+            text = self._append_eval_marker(text, review_id)
+            return text
+        except Exception as e:
+            get_logger().warning(f"Failed to append feedback section: {e}")
+            return pr_review
+
+    def _record_project_skill_usage(self, review_id: str) -> None:
+        try:
+            from pr_agent.feedback.store import save_project_skill_usage
+            from pr_agent.suggestions.prompt_provenance import build_project_skill_usage_identity
+
+            effective = getattr(self, "project_skill_effective", None)
+            if effective is None:
+                return
+            global_hash, bundle_hash = build_project_skill_usage_identity(effective, "review")
+            save_project_skill_usage({
+                "review_id": review_id,
+                "command": "review",
+                "project": getattr(self.git_provider, "id_project", ""),
+                "mr_iid": getattr(self.git_provider, "id_mr", ""),
+                "target_branch": effective.target_branch,
+                "target_sha": effective.target_sha,
+                "skill_hash": effective.skill_hash,
+                "manifest_hash": effective.manifest_hash,
+                "load_status": effective.status,
+                "selected_rule_ids": list(effective.selected_rule_ids),
+                "matched_files": dict(effective.matched_files),
+                "reference_hashes": dict(effective.reference_hashes),
+                "global_prompt_set_hash": global_hash,
+                "prompt_bundle_hash": bundle_hash,
+                "truncated": effective.truncated,
+                "error": effective.error,
+            })
+        except Exception as exc:
+            get_logger().warning(f"Failed to record project Skill usage: {exc}")
+
+    def _append_eval_marker(self, text: str, review_id: str) -> str:
+        """Opt-in: stamp a hidden ``pr-agent-eval`` marker freezing review context.
+
+        Guarded by ``eval.enable_capture``; pure append and fully wrapped so it
+        can never affect review publishing. Reuses ``review_id`` as the join key.
+        """
+        try:
+            if not get_settings().get("eval.enable_capture", False):
+                return text
+            from pr_agent.eval.marker import build_eval_marker
+            input_snapshot = self._build_eval_input_snapshot()
+            marker = build_eval_marker(self.git_provider, review_id, input_snapshot)
+            if marker:
+                text += f"\n{marker}"
+        except Exception as e:
+            get_logger().warning(f"Failed to append eval marker: {e}")
+        return text
+
+    def _build_eval_input_snapshot(self) -> dict:
+        """Freeze the non-code review inputs as of review time.
+
+        These are exactly the values fed to the review prompt (already gathered
+        in ``self.vars``), so a later replay can reproduce the same inputs even
+        if the MR title/description/commits change afterwards. Best-effort.
+        """
+        snapshot = {}
+        try:
+            snapshot = {
+                "title": self.vars.get("title"),
+                "description": self.vars.get("description"),
+                "commit_messages": self.vars.get("commit_messages_str"),
+                "branch": self.vars.get("branch"),
+                "related_tickets": get_settings().get("related_tickets", []),
+            }
+            effective = getattr(self, "project_skill_effective", None)
+            if effective is not None:
+                snapshot["project_skill"] = {
+                    "target_sha": effective.target_sha,
+                    "skill_hash": effective.skill_hash,
+                    "status": effective.status,
+                    "rule_ids": list(effective.selected_rule_ids),
+                    "reference_hashes": dict(effective.reference_hashes),
+                }
+            try:
+                mr = getattr(self.git_provider, "mr", None)
+                if mr is not None:
+                    snapshot["target_branch"] = getattr(mr, "target_branch", None)
+                    snapshot["source_branch"] = getattr(mr, "source_branch", None)
+            except Exception:
+                pass
+        except Exception as e:
+            get_logger().warning(f"Failed to build eval input snapshot: {e}")
+        return snapshot
+
     async def _prepare_prediction(self, model: str) -> None:
+        if get_settings().get("large_mr_review.enabled", True):
+            await self._prepare_prediction_map_reduce(model)
+            return
         self.patches_diff = get_pr_diff(self.git_provider,
                                         self.token_handler,
                                         model,
@@ -194,37 +365,166 @@ class PRReviewer:
                                         disable_extra_lines=False,)
 
         if self.patches_diff:
+            self.related_files_context = self._get_related_files_context()
             get_logger().debug(f"PR diff", diff=self.patches_diff)
             self.prediction = await self._get_prediction(model)
         else:
             get_logger().warning(f"Empty diff for PR: {self.pr_url}")
             self.prediction = None
 
-    async def _get_prediction(self, model: str) -> str:
-        """
-        Generate an AI prediction for the pull request review.
+    async def _prepare_prediction_map_reduce(self, model: str) -> None:
+        """Review every planned Diff chunk and derive coverage from trusted ownership."""
+        self.coverage_failure_message = ""
+        self.coverage_partial_notice = ""
+        plan = build_review_chunk_plan(
+            self.git_provider,
+            self.token_handler,
+            model,
+            add_line_numbers=True,
+            max_chunks=int(get_settings().get("large_mr_review.max_chunks", 20)),
+            output_buffer_tokens=int(get_settings().get("large_mr_review.output_buffer_tokens", 1500)),
+            metadata_tokens=int(get_settings().get("large_mr_review.chunk_metadata_tokens", 256)),
+        )
+        self.review_chunk_plan = plan
+        self.patches_diff = "\n\n".join(chunk.text for chunk in plan.chunks)
+        if not plan.is_complete_plan:
+            self.review_coverage = coverage_for_results(plan, (), ())
+            self.prediction = None
+            self.coverage_failure_message = self._format_coverage_message(self.review_coverage, plan.status)
+            get_logger().warning(self.coverage_failure_message)
+            return
 
-        Args:
-            model: A string representing the AI model to be used for the prediction.
+        self.related_files_context = self._get_related_files_context()
+        max_concurrency = max(1, int(get_settings().get("large_mr_review.max_concurrency", 4)))
+        semaphore = asyncio.Semaphore(max_concurrency)
 
-        Returns:
-            A string representing the AI prediction for the pull request review.
-        """
-        variables = copy.deepcopy(self.vars)
-        variables["diff"] = self.patches_diff  # update diff
+        async def predict(chunk):
+            async with semaphore:
+                return await self._get_prediction(model, chunk.text)
 
-        environment = Environment(undefined=StrictUndefined)
-        system_prompt = environment.from_string(get_settings().pr_review_prompt.system).render(variables)
-        user_prompt = environment.from_string(get_settings().pr_review_prompt.user).render(variables)
+        results = await asyncio.gather(*(predict(chunk) for chunk in plan.chunks), return_exceptions=True)
+        successful_ids = []
+        failed_ids = []
+        predictions = []
+        for chunk, result in zip(plan.chunks, results):
+            if isinstance(result, BaseException) or not result:
+                failed_ids.append(chunk.chunk_id)
+                get_logger().warning(f"Large MR review chunk failed: {chunk.chunk_id[:12]}")
+                continue
+            successful_ids.append(chunk.chunk_id)
+            predictions.append(result)
+        self.review_coverage = coverage_for_results(plan, successful_ids, failed_ids)
+        if not predictions:
+            self.prediction = None
+        elif len(predictions) == 1:
+            self.prediction = predictions[0]
+        else:
+            self.prediction = merge_review_predictions(predictions)
 
-        response, finish_reason = await self.ai_handler.chat_completion(
-            model=model,
-            temperature=get_settings().config.temperature,
-            system=system_prompt,
-            user=user_prompt
+        if self.review_coverage.status != "complete":
+            message = self._format_coverage_message(self.review_coverage, "chunk_failure")
+            if bool(get_settings().get("large_mr_review.fail_closed", True)):
+                self.prediction = None
+                self.coverage_failure_message = message
+            else:
+                self.coverage_partial_notice = message
+            get_logger().warning(message)
+
+    @staticmethod
+    def _format_coverage_message(coverage, reason: str) -> str:
+        completed = len(coverage.completed_unit_ids)
+        expected = len(coverage.expected_unit_ids)
+        return (
+            "⚠️ 大 MR 审查未完整覆盖："
+            f"已处理 {completed}/{expected} 个 Diff 单元，原因 `{reason}`。"
+            "系统不会把该结果标记为完整审查。"
         )
 
-        return response
+    async def _prepare_prediction_related_files_only(self) -> None:
+        """Test-only seam: same diff/related-files computation as
+        `_prepare_prediction`, without requiring a full `get_pr_diff` mock
+        chain. Production code calls `_prepare_prediction`; this exists so
+        the diff-vs-related-files separation can be exercised directly."""
+        self.patches_diff = get_pr_diff(self.git_provider, self.token_handler, "gpt-4",
+                                        add_line_numbers_to_hunks=True, disable_extra_lines=False)
+        if self.patches_diff:
+            self.related_files_context = self._get_related_files_context()
+
+    def _get_related_files_context(self) -> str:
+        """Return optional dependency context without blocking a review on failure."""
+        if not get_settings().get("pr_reviewer.code_graph.enabled", False):
+            return ""
+
+        try:
+            target_branch = getattr(getattr(self.git_provider, "mr", None), "target_branch", None)
+            if not target_branch:
+                return ""
+
+            repo_url = self.git_provider.get_git_repo_url(self.pr_url)
+            if not repo_url:
+                return ""
+            clone_url = self.git_provider._prepare_clone_url_with_token(repo_url)
+            if not clone_url:
+                return ""
+
+            changed_files = [
+                ChangedFile(relpath=file.filename, new_content=file.head_file or "")
+                for file in self.git_provider.get_diff_files()
+                if getattr(file, "filename", None)
+            ]
+            return build_related_files_context(
+                changed_files, clone_url, repo_url, target_branch, self.token_handler
+            )
+        except Exception as exc:
+            get_logger().warning(f"code_graph: failed to build related-files context: {exc}")
+            return ""
+
+    async def _get_prediction(self, model: str, patches_diff: str | None = None) -> str:
+        """
+        Generate AI prediction(s) for the pull request review.
+        For mixed-language PRs, makes separate calls per language and merges results.
+        Always produces a single unified prediction.
+        """
+        variables = copy.deepcopy(self.vars)
+        variables["diff"] = self.patches_diff if patches_diff is None else patches_diff
+        variables["related_files_context"] = getattr(self, "related_files_context", "")
+
+        environment = Environment(undefined=StrictUndefined)
+
+        # Get prompt pairs: 1 for pure language, 2 for mixed
+        changed_files = tuple(getattr(self, "_changed_files", ()) or self.git_provider.get_files())
+        detected_lang = detect_language_from_files(list(changed_files))
+        use_v2_prompts = bool(get_settings().get("pr_reviewer.code_graph.enabled", False))
+        prompt_pairs = get_review_prompt_pairs(detected_lang, use_v2=use_v2_prompts)
+        prompt_languages = improve_prompt_pair_languages(detected_lang)
+
+        predictions = []
+        for pair_index, (sys_tmpl, usr_tmpl) in enumerate(prompt_pairs):
+            system_prompt = environment.from_string(sys_tmpl).render(variables)
+            user_prompt = environment.from_string(usr_tmpl).render(variables)
+            session = getattr(self, "project_skill_session", None)
+            effective = (
+                session.effective(
+                    "review",
+                    languages=prompt_languages[pair_index],
+                    files=changed_files,
+                )
+                if session is not None
+                else EffectiveProjectSkill("", "review", "", "", "missing", "", "")
+            )
+            user_prompt = append_project_skill_context(user_prompt, effective)
+            response, finish_reason = await self.ai_handler.chat_completion(
+                model=model,
+                temperature=get_settings().config.temperature,
+                system=system_prompt,
+                user=user_prompt
+            )
+            predictions.append(response)
+
+        # Merge if multiple predictions (mixed PR), otherwise return as-is
+        if len(predictions) > 1:
+            return merge_review_predictions(predictions)
+        return predictions[0]
 
     def _prepare_pr_review(self) -> str:
         """
@@ -246,7 +546,13 @@ class PRReviewer:
         # move data['review'] 'key_issues_to_review' key to the end of the dictionary
         if 'key_issues_to_review' in data['review']:
             key_issues_to_review = data['review'].pop('key_issues_to_review')
+            # inject doc_drift row just before key_issues (only when detection ran)
+            if getattr(self, '_doc_drift_kept', None) is not None:
+                data['review']['doc_drift'] = self._doc_drift_kept  # [] = no drift, list = stale docs
             data['review']['key_issues_to_review'] = key_issues_to_review
+        else:
+            if getattr(self, '_doc_drift_kept', None) is not None:
+                data['review']['doc_drift'] = self._doc_drift_kept
 
         incremental_review_markdown_text = None
         # Add incremental review section

@@ -40,6 +40,13 @@ Additional scoring considerations:
    - Using more specific exception types.
    - Questions the definition, declaration, import, or initialization of any entity in the PR code, that might be done in the outer codebase.
 
+Language requirement:
+{%- if is_zh %}
+- All natural language output MUST be in Chinese. In particular, the 'why' field MUST be written in concise Chinese (1-2 sentences), and any code element mentioned should be wrapped in backticks (`).
+{%- else %}
+- Use English for all natural language outputs.
+{%- endif %}
+
 
 
 The PR code diff will be presented in the following structured format:
@@ -124,6 +131,10 @@ Below are {{ num_code_suggestions }} AI-generated code suggestions for the Pull 
 ======
 {{ suggestion_str|trim }}
 ======
+
+{%- if is_zh %}
+- IMPORTANT: The 'why' field MUST be written in Chinese.
+{%- endif %}
 
 
 {%- if duplicate_prompt_examples %}

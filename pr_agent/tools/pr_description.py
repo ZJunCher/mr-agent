@@ -19,6 +19,7 @@ from pr_agent.algo.utils import (ModelType, PRDescriptionHeader, clip_tokens,
                                  get_max_tokens, get_user_labels, load_yaml,
                                  set_custom_labels,
                                  show_relevant_configurations)
+from pr_agent.algo.language_router import detect_language_from_files, resolve_description_prompt_key
 from pr_agent.config_loader import get_settings
 from pr_agent.git_providers import (GithubProvider, get_git_provider,
                                     get_git_provider_with_context)
@@ -429,7 +430,17 @@ class PRDescription:
         set_custom_labels(variables, self.git_provider)
         self.variables = variables
 
-        system_prompt = environment.from_string(get_settings().get(prompt, {}).get("system", "")).render(self.variables)
+        # Language-based prompt routing (single call, single output)
+        detected_lang = detect_language_from_files(self.git_provider.get_files())
+        if prompt == "pr_description_prompt":
+            prompt, supplement = resolve_description_prompt_key(detected_lang)
+        else:
+            supplement = None
+
+        sys_raw = get_settings().get(prompt, {}).get("system", "")
+        if supplement:
+            sys_raw = sys_raw + supplement
+        system_prompt = environment.from_string(sys_raw).render(self.variables)
         user_prompt = environment.from_string(get_settings().get(prompt, {}).get("user", "")).render(self.variables)
 
         response, finish_reason = await self.ai_handler.chat_completion(
@@ -445,8 +456,8 @@ class PRDescription:
         # Load the AI prediction data into a dictionary
         self.data = load_yaml(self.prediction.strip(), keys_fix_yaml=self.keys_fix)
 
-        if get_settings().pr_description.add_original_user_description and self.user_description:
-            self.data["User Description"] = self.user_description
+        if get_settings().pr_description.add_original_user_description:
+            self.data["User Description"] = self.user_description or ""
 
         # re-order keys
         if 'User Description' in self.data:
@@ -560,7 +571,9 @@ class PRDescription:
         if 'labels' in self.data and self.git_provider.is_supported("get_labels"):
             self.data.pop('labels')
         if not get_settings().pr_description.enable_pr_type:
-            self.data.pop('type')
+            # AI prediction may omit the 'type' key entirely (model output drift),
+            # so pop with a default to avoid crashing the whole describe flow.
+            self.data.pop('type', None)
 
         # Remove the 'PR Title' key from the dictionary
         ai_title = self.data.pop('title', self.vars["title"])
@@ -575,10 +588,33 @@ class PRDescription:
         # except for the items containing the word 'walkthrough'
         pr_body, changes_walkthrough = "", ""
         pr_file_changes = []
+        lang = str(get_settings().config.get("response_language", "zh-CN")).lower()
+        is_zh = lang.startswith("zh")
+
+        # Always place original user description at the top when available.
+        user_description_from_data = self.data.pop("User Description", None)
+        user_description_text = user_description_from_data if user_description_from_data is not None else self.user_description
+        if isinstance(user_description_text, list):
+            user_description_text = "\n".join(str(v) for v in user_description_text)
+        user_header = "用户原始描述" if is_zh else "User Description"
+        if isinstance(user_description_text, str) and user_description_text.strip():
+            pr_body += f"<details open> <summary><h3>{user_header}</h3></summary>\n\n"
+            pr_body += f"{user_description_text.strip()}\n\n"
+            pr_body += "</details>\n\n___\n\n"
+        else:
+            pr_body += f"<details open> <summary><h3>{user_header}</h3></summary>\n\n"
+            pr_body += "</details>\n\n___\n\n"
+
+        zh_map = {
+            "PR Type": "PR 类型",
+            "Description": "描述",
+        }
         for idx, (key, value) in enumerate(self.data.items()):
+            section_details_open = False
             if key == 'changes_diagram':
-                pr_body += f"### {PRDescriptionHeader.DIAGRAM_WALKTHROUGH.value}\n\n"
-                pr_body += f"{value}\n\n"
+                header = PRDescriptionHeader.DIAGRAM_WALKTHROUGH.value if not is_zh else "图示详解"
+                pr_body += f"<h3>{header}</h3>\n\n"
+                pr_body += f"{value}\n"
                 continue
             if key == 'pr_files':
                 value = self.file_label_dict
@@ -586,12 +622,17 @@ class PRDescription:
                 key_publish = key.rstrip(':').replace("_", " ").capitalize()
                 if key_publish == "Type":
                     key_publish = "PR Type"
-                # elif key_publish == "Description":
-                #     key_publish = "PR Description"
-                pr_body += f"### **{key_publish}**\n"
+                if is_zh:
+                    key_publish = zh_map.get(key_publish, key_publish)
+                # description content already contains structured markdown sections,
+                # so avoid adding an extra empty wrapper header.
+                if key.lower().strip() != 'description':
+                    pr_body += f"<details> <summary><h3>{key_publish}</h3></summary>\n\n"
+                    section_details_open = True
             if 'walkthrough' in key.lower():
                 if self.git_provider.is_supported("gfm_markdown"):
-                    pr_body += "<details> <summary>files:</summary>\n\n"
+                    summary = "files:" if not is_zh else "文件:"
+                    pr_body += f"<details> <summary>{summary}</summary>\n\n"
                 for file in value:
                     filename = file['filename'].replace("'", "`")
                     description = file['changes_in_file']
@@ -604,23 +645,157 @@ class PRDescription:
                     initial_status = " open"
                 else:
                     initial_status = ""
-                changes_walkthrough = f"<details{initial_status}> <summary><h3> {PRDescriptionHeader.FILE_WALKTHROUGH.value}</h3></summary>\n\n"
+                fw_header = PRDescriptionHeader.FILE_WALKTHROUGH.value if not is_zh else "文件详解"
+                summary = "Expand to view files" if not is_zh else "展开查看文件列表"
+                changes_walkthrough = f"<details> <summary><h3>{fw_header}</h3></summary>\n\n"
+                changes_walkthrough += f"<details{initial_status}> <summary>{summary}</summary>\n\n"
                 changes_walkthrough += f"{changes_walkthrough_table}\n\n"
+                changes_walkthrough += "</details>\n\n"
                 changes_walkthrough += "</details>\n\n"
             elif key.lower().strip() == 'description':
                 if isinstance(value, list):
                     value = ', '.join(v.rstrip() for v in value)
                 value = value.replace('\n-', '\n\n-').strip() # makes the bullet points more readable by adding double space
+                value = self._format_description_two_columns(value, self.git_provider.pr.title)
                 pr_body += f"{value}\n"
             else:
                 # if the value is a list, join its items by comma
                 if isinstance(value, list):
                     value = ', '.join(v.rstrip() for v in value)
                 pr_body += f"{value}\n"
+            if section_details_open:
+                pr_body += "\n</details>\n"
             if idx < len(self.data) - 1:
                 pr_body += "\n\n___\n\n"
 
         return title, pr_body, changes_walkthrough, pr_file_changes,
+
+    @staticmethod
+    def _process_test_section(test_section: str) -> str:
+        """Process test section: remove subheadings and test results, update test names, add test rate line."""
+        if not isinstance(test_section, str):
+            return test_section
+
+        lines = []
+        skip_until_next_item = False
+
+        for raw_line in test_section.splitlines():
+            line = raw_line.strip()
+
+            if line.startswith("## "):
+                # Skip root heading to avoid duplicate "测试说明" inside the details body.
+                continue
+
+            if line.startswith("### "):
+                skip_until_next_item = True
+                continue
+
+            if line.startswith("- ") or line.startswith("- ["):
+                skip_until_next_item = False
+
+            skip_token_lines = [
+                "测试用例",
+                "测试结果",
+                "单元测试通过率",
+                "集成测试通过率"
+            ]
+            if any(skip_token in line for skip_token in skip_token_lines):
+                if line.startswith("- "):
+                    skip_until_next_item = True
+                continue
+
+            if skip_until_next_item and not (line.startswith("- ") or line.startswith("- [")):
+                continue
+
+            line = re.sub(r'手动测试(?:已完成)?', '实车测试', line)
+            line = re.sub(r'(单元测试|集成测试|实车测试|仿真测试)已(?:添加|完成)', r'\1', line)
+
+            if line:
+                lines.append(line)
+
+        if not any("仿真测试" in line for line in lines):
+            lines.append("- [ ] 仿真测试")
+        lines.append("\n测试报告：")
+
+        return "## 测试说明\n" + "\n".join(lines)
+
+    @staticmethod
+    def _extract_issue_id_from_title(pr_title: str) -> str:
+        if not isinstance(pr_title, str) or not pr_title.strip():
+            return ""
+        match = re.search(r'\bm-(\d+)\b', pr_title, flags=re.IGNORECASE)
+        return match.group(1) if match else ""
+
+    @classmethod
+    def _format_description_two_columns(cls, description: str, pr_title: str = "") -> str:
+        if not isinstance(description, str) or not description.strip():
+            return description
+
+        required_sections = ["变更说明", "相关需求/问题", "测试说明", "影响范围"]
+        # Keep "变更类型" as a parsing boundary so its content does not bleed into "变更说明".
+        section_pattern = re.compile(r'^##\s*(变更说明|变更类型|相关需求/问题|测试说明|影响范围)\s*$', re.MULTILINE)
+        matches = list(section_pattern.finditer(description))
+        if len(matches) < len(required_sections):
+            return description
+
+        section_map = {}
+        for idx, match in enumerate(matches):
+            section_name = match.group(1)
+            start = match.start()
+            end = matches[idx + 1].start() if idx + 1 < len(matches) else len(description)
+            section_map[section_name] = description[start:end].strip()
+
+        if any(name not in section_map for name in required_sections):
+            return description
+
+        issue_id = cls._extract_issue_id_from_title(pr_title)
+        issue_id_or_placeholder = issue_id if issue_id else "[在此填入问题ID]"
+        req_link_line = f"### 需求链接：https://project.feishu.cn/eabot/issue/detail/{issue_id_or_placeholder}"
+
+        def _section_to_details(section_name: str, block_text: str) -> str:
+            lines = block_text.splitlines()
+            content_lines = []
+            for raw_line in lines[1:]:
+                line = raw_line.strip()
+                if not line:
+                    content_lines.append("")
+                    continue
+
+                if line.startswith("### "):
+                    # Keep sub-headings separated from task list items to avoid inline rendering in GFM.
+                    heading_text = line[4:].strip()
+                    if content_lines and content_lines[-1] != "":
+                        content_lines.append("")
+                    content_lines.append(f"**{heading_text}**")
+                    content_lines.append("")
+                    continue
+
+                content_lines.append(line)
+
+            details_tag = "<details open>" if section_name in {"变更说明", "影响范围", "测试说明"} else "<details>"
+            section_text = f"{details_tag}\n<summary><h3>{section_name}</h3></summary>"
+            if content_lines:
+                section_text += "\n\n" + "\n".join(content_lines)
+            section_text += "\n</details>"
+            return section_text
+
+        # Build sections in requested order
+        sections_list = []
+
+        for section_name in ["变更说明", "影响范围"]:
+            if section_name in section_map and section_map[section_name].strip():
+                block = section_map[section_name]
+                sections_list.append(_section_to_details(section_name, block))
+
+        # "相关需求/问题" is replaced by a fixed link line without collapsible wrapper.
+        sections_list.append(req_link_line)
+
+        if "测试说明" in section_map and section_map["测试说明"].strip():
+            test_section = section_map["测试说明"]
+            test_section = cls._process_test_section(test_section)
+            sections_list.append(_section_to_details("测试说明", test_section))
+
+        return "\n\n".join(sections_list).strip()
 
     def _prepare_file_labels(self):
         file_label_dict = {}
@@ -670,8 +845,10 @@ class PRDescription:
         if not self.git_provider.is_supported("gfm_markdown"):
             return pr_body, pr_comments
         try:
+            lang = str(get_settings().config.get("response_language", "zh-CN")).lower()
+            is_zh = lang.startswith("zh")
             pr_body += "<table>"
-            header = f"Relevant files"
+            header = f"Relevant files" if not is_zh else "相关文件"
             delta = 75
             # header += "&nbsp; " * delta
             pr_body += f"""<thead><tr><th></th><th align="left">{header}</th></tr></thead>"""
@@ -718,12 +895,10 @@ class PRDescription:
                         # get_logger().warning(f"Error getting line link for '{filename}'")
                         link = ""
                         # continue
-
                     # Add file data to the PR body
                     file_change_description_br = insert_br_after_x_chars(file_change_description, x=(delta - 5))
                     pr_body = self.add_file_data(delta_nbsp, diff_plus_minus, file_change_description_br, filename,
                                                  filename_publish, link, pr_body)
-
                 # Close the collapsible file list
                 if use_collapsible_file_list:
                     pr_body += """</table></details></td></tr>"""

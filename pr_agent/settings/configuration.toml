@@ -8,7 +8,11 @@
 # models
 model="gpt-5.2-2025-12-11"
 fallback_models=["o4-mini"]
-#model_reasoning="o4-mini" # dedicated reasoning model for self-reflection
+model_retry_limit=2
+model_retry_base_seconds=1.0
+model_retry_max_seconds=8.0
+independent_fallback_models=["anthropic/claude-haiku-4-5-20251001"]
+model_reasoning="anthropic/claude-opus-4-8" # dedicated reasoning model for self-reflection, independent of config.model
 #model_weak="gpt-4o" # optional, a weaker model to use for some easier tasks
 # CLI
 git_provider="github"
@@ -26,7 +30,7 @@ disable_auto_feedback = false
 ai_timeout=120 # 2minutes
 skip_keys = []
 custom_reasoning_model = false # when true, disables system messages and temperature controls for models that don't support chat-style inputs
-response_language="en-US" # Language locales code for PR responses in ISO 3166 and ISO 639 format (e.g., "en-US", "it-IT", "zh-CN", ...)
+response_language="zh-CN" # Language locales code for PR responses in ISO 3166 and ISO 639 format (e.g., "en-US", "it-IT", "zh-CN", ...)
 # token limits
 max_description_tokens = 500
 max_commits_tokens = 500
@@ -60,6 +64,7 @@ ignore_pr_labels = [] # labels to ignore from PR agent when an PR is created
 ignore_pr_authors = [] # authors to ignore from PR agent when an PR is created
 ignore_repositories = [] # a list of regular expressions of repository full names (e.g. "org/repo") to ignore from PR agent processing
 ignore_language_framework = [] # a list of code-generation languages or frameworks (e.g. 'protobuf', 'go_gen') whose auto-generated source files will be excluded from analysis
+ignore_third_party_imports = true # if true, strip newly added import lines for third-party packages in Python/JS/TS patches
 #
 is_auto_command = false # will be auto-set to true if the command is triggered by an automation
 enable_ai_metadata = false # will enable adding ai metadata
@@ -74,11 +79,19 @@ enable_claude_extended_thinking = false # Set to true to enable extended thinkin
 extended_thinking_budget_tokens = 2048
 extended_thinking_max_output_tokens = 4096
 
+[large_mr_review] # complete Map-Reduce coverage for /review and /improve #
+enabled = true
+output_buffer_tokens = 1500
+chunk_metadata_tokens = 256
+max_chunks = 20
+max_concurrency = 4
+fail_closed = true
+
 
 [pr_reviewer] # /review #
 # enable/disable features
 require_score_review=false
-require_tests_review=true
+require_tests_review=false
 require_estimate_effort_to_review=true
 require_can_be_split_review=false
 require_security_review=true
@@ -100,21 +113,71 @@ minimal_commits_for_incremental_review=0
 minimal_minutes_for_incremental_review=0
 enable_intro_text=true
 enable_help_text=false # Determines whether to include help text in the PR review. Enabled by default.
+enable_feedback_hint=true # append a hint at the end of the review inviting users to rate it via /feedback
+
+[project_review_skill]
+# Project-owned declarative review rules are read only from the MR target branch SHA.
+# disabled | shadow | review_only | review_and_improve
+rollout_mode = "review_and_improve"
+
+[pr_reviewer.code_graph] # file-level dependency context for /review - see docs/superpowers/specs/2026-07-14-code-graph-context-design.md
+enabled = true # opt-in; existing review behavior is unchanged until this is flipped to true
+supported_languages = ["python", "cpp"]
+max_hops = 2 # dependency traversal depth, both forward (files the changed file imports) and reverse (files that import the changed file)
+token_budget = 8000 # max tokens spent on related-files context, on top of the PR diff itself
+clone_timeout_seconds = 60
+parse_timeout_seconds = 30
+stale_graph_ttl_days = 15 # branch clones/graphs unused for this many days are deleted and rebuilt on next use
+storage_root = "/app/data/code_graph" # mount on a host volume in production so clones and graphs survive container restarts
+
+[pr_feedback] # /feedback (alias /rate) #
+# Collect user ratings/comments about review results for later analysis.
+# storage_path points to a single SQLite file; in production mount it on a host
+# volume (e.g. -v /opt/pr-agent/data:/app/data) so data survives restarts.
+storage_path = "/app/data/feedback/review_feedback.db"
+min_score = 1
+max_score = 5
+gate_enabled = false                       # master switch for the mandatory-feedback merge gate
+gate_status_context = "pr-agent/feedback"  # GitLab commit status name used to block/unblock merge
+comment_required_below = 5                 # comment is mandatory when score < this value (5 = full mark needs no comment)
+
+[pr_inline_suggestion_gate] # gate that blocks merge until every published inline suggestion is applied or resolved #
+gate_enabled = false                                # master switch; OFF for all projects (gate disabled 2026-07-10 per user request)
+gate_status_context = "pr-agent/inline-suggestions（请查看下方建议）"  # commit status name, independent from pr-agent/feedback; wording nudges reviewers to scroll down to the inline suggestions
+gate_project_allowlist = ["cook"]                    # gray-rollout scope; unlisted projects are fully unaffected even if gate_enabled=true; "*" opens to all. chogori pending, add after cook is verified.
+
+[pr_mr_create.report_export] # download link appended to the mr_create combined summary, see docs/superpowers/specs/2026-07-16-report-export-design.md #
+enabled = true # additive, best-effort: on any failure the download line is simply omitted, main comment is unaffected
+
+[eval] # offline evaluation / replay benchmark (additive, opt-in) #
+# When enabled, reviews are stamped with a hidden pr-agent-eval marker freezing
+# the exact code state (base/head/start sha + model + small config snapshot),
+# and a baseline "review_run" is persisted when a user scores via /feedback.
+# This is required to later replay the same PRs against new prompts/models.
+# Toggle without rebuilding via env var EVAL__ENABLE_CAPTURE=true|false.
+enable_capture = true
+# review_runs live alongside review_feedback (joined by review_id). Leave empty
+# to reuse pr_feedback.storage_path.
+storage_path = ""
+# replay results (P1) are written to a separate file to isolate write locks.
+benchmark_db_path = "/app/data/eval/benchmark_eval.db"
+# optional: only needed for the GitPython local-clone replay fallback.
+repos_root = ""
 
 [pr_description] # /describe #
 publish_labels=false
-add_original_user_description=true
+add_original_user_description=false
 generate_ai_title=false
 use_bullet_points=true
 extra_instructions = ""
-enable_pr_type=true
+enable_pr_type=false
 final_update_message = true
 enable_help_text=false
 enable_help_comment=false
 enable_pr_diagram=true # adds a section with a diagram of the PR changes
 # describe as comment
 publish_description_as_comment=false
-publish_description_as_comment_persistent=true
+publish_description_as_comment_persistent=false
 ## changes walkthrough section
 enable_semantic_files_types=true
 collapsible_file_list='adaptive' # true, false, 'adaptive'
@@ -138,6 +201,58 @@ use_conversation_history=true
 commitable_code_suggestions = false
 dual_publishing_score_threshold=-1 # -1 to disable, [0-10] to set the threshold (>=) for publishing a code suggestion both in a table and as commitable
 focus_only_on_problems=true
+# inline suggestion dual-publishing (phase 1, additive; publishes selected /improve
+# suggestions as GitLab-native inline suggestions on the exact diff lines).
+# Test config: it runs via mr_create and only for allowlisted projects.
+inline_suggestions_enabled = true                  # master switch for the inline-suggestion sub-feature
+inline_suggestions_on_mr_create = true             # publish inline suggestions from the mr_create flow
+inline_suggestions_on_improve_command = true       # publish inline suggestions when a user manually runs /improve
+inline_suggestions_project_allowlist = ["*"] # "*" = all projects (company-wide rollout); or list specific paths/ids for gray release
+inline_suggestion_min_score = 0                    # only publish suggestions with score >= this value (0 = publish all, test phase)
+inline_suggestion_max_lines = 50                   # skip one-click Apply when the replaced range exceeds this many lines
+inline_suggestion_keep_summary_comment = true      # keep the original /improve summary comment as well
+inline_suggestions_storage_path = ""               # empty -> reuse pr_feedback.storage_path
+inline_suggestion_collapsed = false                # wrap the suggestion code block in <details> (false = always expanded, so users see the suggestion at first glance)
+inline_publish_retry_limit = 1                      # refresh the MR diff and retry a rejected position once
+inline_publish_fallback_comment = true              # preserve rejected inline suggestions as ordinary MR comments
+# pre-publish heuristic gate (phase 1): block inline suggestions that are likely
+# incomplete or unsafe to one-click apply; blocked ones stay in the summary only.
+inline_gate_enabled = true                         # master switch for the heuristic gate
+inline_gate_check_new_symbol = true                # block when improved_code uses symbols absent from the file (G1)
+inline_gate_check_new_dependency = true            # block when improved_code adds #include/import not in the file (G2)
+inline_gate_check_cross_file = true                # block when the suggestion asks to modify another file (G3)
+inline_gate_check_incomplete = true                # block ellipsis markers / brace imbalance / existing_code mismatch (G4)
+inline_gate_check_speculative = true               # block speculative categories (G5)
+inline_gate_speculative_labels = ["performance"]   # labels treated as speculative for G5
+# self-check (phase 2): lightweight LLM validation of the phase-1 survivors.
+# 2A checks each suggestion is a complete/safe self-contained fix; 2B resolves
+# cross-suggestion conflicts so multiple can be one-click applied together.
+inline_selfcheck_enabled = true                    # master switch for phase-2 self-check (2A)
+inline_selfcheck_model = "anthropic/claude-opus-4-8" # lightweight judge model, independent of the main model
+inline_selfcheck_fail_action = "skip"              # on error: skip=block (fail-closed, default) / pass=publish
+inline_selfcheck_max_candidates = 5                # cap self-checked suggestions per MR (cost guard)
+inline_conflict_check_enabled = true               # master switch for phase-2 batch de-conflict (2B)
+inline_conflict_adjacency_lines = 3                # line distance <= this counts as adjacent (conflict signal)
+inline_conflict_fail_action = "keep_top1"          # on de-conflict error: keep only the highest-scored suggestion
+# Pipeline v2 (generate-then-repair): stricter self-reflect standard + a three-tier
+# repair chain (deterministic -> Tier-1 small model -> Tier-2 heavy Copilot CLI
+# channel) so suggestions that survive review are actively fixed to be one-click
+# appliable instead of filtered out downstream. See docs/superpowers/specs/2026-07-10-improve-pipeline-overhaul-design.md
+pipeline_v2_enabled = true                         # master switch; true enables the generate-then-repair pipeline
+fix_fuzzy_match_threshold = 0.85                   # deterministic-fix existing_code fuzzy-match similarity threshold
+tier1_repair_model = ""                            # empty -> reuse inline_selfcheck_model
+tier1_repair_max_retries = 2                        # max small-model repair attempts per unresolved suggestion/task
+tier2_enabled = true                               # independent switch for the Copilot CLI heavy-repair channel;
+                                                    # Copilot CLI login on the server confirmed working (2026-07-11) --
+                                                    # flipping it off never affects stages (1)-(4) above
+tier2_timeout_seconds = 480                        # single Tier-2 session timeout (clone + Copilot CLI run)
+tier2_clone_depth = 1                               # shallow-clone depth for the Tier-2 workdir
+# scenario validator (applies to all /improve outputs, not only inline)
+scenario_validation_enabled = true                 # master switch for scenario-specific filtering
+scenario_validation_model = "anthropic/claude-opus-4-8" # judge model for scenario clarity/extreme checks
+scenario_validation_fail_action = "skip"           # on error: skip=block suggestions (fail-closed) / pass=keep
+scenario_validation_max_candidates = 30            # cost guard; candidates above this cap are handled by local strict check only
+filter_persistence_enabled = true                    # persist cross-review (scenario_validation) filtered suggestions to filtered_suggestions table for dashboard
 #
 extra_instructions = ""
 enable_help_text=false
@@ -148,7 +263,7 @@ publish_output_no_suggestions=true
 # enable to apply suggestion 💎
 apply_suggestions_checkbox=true
 # suggestions scoring
-suggestions_score_threshold=0 # [0-10]| recommend not to set this value above 8, since above it may clip highly relevant suggestions
+suggestions_score_threshold=7 # [0-10]| recommend not to set this value above 8, since above it may clip highly relevant suggestions
 new_score_mechanism=true
 new_score_mechanism_th_high=9
 new_score_mechanism_th_medium=7
@@ -224,6 +339,7 @@ final_update_message = false
 [pr_help] # /help #
 force_local_db=false
 num_retrieved_snippets=5
+collapsed_output=true
 
 [pr_config] # /config #
 
@@ -234,6 +350,23 @@ docs_path = "docs"
 exclude_root_readme = false
 supported_doc_exts = [".md", ".mdx", ".rst"]
 enable_help_text=false
+
+[doc_drift] # /doc_drift #
+enabled = true
+trigger_on_command = true              # allow the manual /doc_drift command
+trigger_on_mr = false                  # reserved, currently unused (no code reads this key; real gate is [gitlab].pr_commands + show_in_review below)
+call_strategy = "single"               # single (A, default) | per_doc (B, reserved)
+model = "anthropic/claude-sonnet-4-5-20250929"  # verified stable/compliant model; empty -> config.model_weak/config.model
+fallback_models = ["anthropic/claude-haiku-4-5-20251001"]
+repo_url = ""                          # if empty, deduced from the MR context
+global_docs = ["AGENTS.md", "README.md", "docs/**/*.md"]
+ancestor_doc_globs = ["*.md", "README*"]
+doc_exts = [".md", ".mdx", ".rst"]
+severity_threshold = "medium"          # only report medium and above
+max_docs_per_mr = 30                   # cap to avoid blowing up the context window / cost
+max_doc_chars = 20000                  # per-doc content trim length
+report_collapsed = true                # default multi-level collapsed report
+show_in_review = false                 # show doc-drift row inside /review output; false also skips running detection entirely (see pr_reviewer.py gate)
 
 [github]
 # The type of deployment to create. Valid values are 'app' or 'user'.
@@ -277,16 +410,43 @@ push_commands = [
 [gitlab]
 url = "https://gitlab.com"
 expand_submodule_diffs = false
+webhook_secret_validation_mode = "optional" # strict | optional | off
 pr_commands = [
     "/describe --pr_description.final_update_message=false",
-    "/review",
-    "/improve",
+    "/mr_create",
 ]
 handle_push_trigger = false
 push_commands = [
     "/describe",
     "/review",
 ]
+
+# 新增
+ignore_bot_user = true
+bot_user_allowlist = ["eabot_devops"]
+
+[suggestion_review_dashboard]
+enabled = true                       # track MR coverage and review-run status
+history_started_at = "2026-08-06T15:08:00+08:00" # retain the existing dashboard history
+sync_enabled = true                  # reconcile webhook inventory from GitLab metadata API
+sync_interval_seconds = 600          # incremental synchronization cadence
+sync_overlap_seconds = 600           # overlap cursor to avoid boundary misses
+sync_lease_seconds = 180             # cross-process synchronization lease
+initial_lookback_days = 30            # first-start inventory backfill window
+reconcile_interval_seconds = 86400   # full reconciliation cadence
+reconcile_lookback_hours = 48         # daily reconciliation window
+not_triggered_after_seconds = 900     # grace period before showing “not triggered”
+run_timeout_seconds = 7200            # stale running rows become execution failures in the dashboard
+creation_recovery_window_seconds = 1800 # recover a missed creation review for at most 30 minutes
+webhook_suspect_mr_count = 3          # repeated sync-only creations before warning about project hooks
+webhook_suspect_window_days = 7       # rolling project webhook coverage window
+alerts_enabled = true                 # evaluate deduplicated aggregate operational alerts
+alert_window_seconds = 1800           # rolling signal window
+alert_cooldown_seconds = 3600         # minimum interval between active-alert reminders
+model_failure_alert_count = 3         # distinct review runs with model failures
+startup_retry_exhausted_alert_count = 2 # distinct runs whose startup recovery was exhausted
+publish_fallback_alert_count = 3      # distinct runs delivered through ordinary-comment fallback
+
 # Configure SSL validation for GitLab. Can be either set to the path of a custom CA or disabled entirely.
 # ssl_verify = true
 
@@ -345,6 +505,14 @@ failure_callback = []
 service_callback = []
 # model_id = "" # Optional: Custom inference profile ID for Amazon Bedrock
 
+[pr_fix_format]
+# 手动 /fix-format 命令：从流水线 code_format_check job 拉取报告并修复代码格式（仅 GitLab）
+format_check_job_names = ["code_format_check"] # 流水线中格式检查 job 名（子串匹配，大小写不敏感）
+report_artifact_name = "code-format-report.txt" # 报告 artifact 路径（日志未给出下载地址时的兜底）
+enable_auto_push = true # 是否将修复结果自动提交到 MR 源分支
+commit_message = "style: 自动修复代码格式" # 提交信息（bot 提交标记）
+pipeline_id = "" # 可选：指定要检查的流水线 ID，默认取源分支最新流水线
+
 [pr_similar_issue]
 skip_comments = false
 force_update_dataset = false
@@ -385,6 +553,162 @@ extra_instructions = "" # public - extra instructions to the auto best practices
 content = ""
 max_patterns = 5 # max number of patterns to be detected
 
+[distributed]
+execution_mode = "inline"
+redis_url = ""
+web_workers = 2
+agent_workers = 3
+worker_max_active_tasks = 4
+worker_inbox_prefetch = 32
+worker_heartbeat_seconds = 5
+worker_dead_seconds = 20
+worker_degraded_lag_seconds = 5
+worker_shutdown_grace_seconds = 120
+mr_lease_seconds = 30
+mr_idle_release_seconds = 120
+task_retry_limit = 3
+auto_workflow_retry_limit = 1
+dedup_ttl_seconds = 600
+pipeline_event_ttl_seconds = 86400
+pipeline_fallback_scan_seconds = 120
+task_heartbeat_seconds = 15
+running_orphan_seconds = 120
+assigned_start_seconds = 120
+queued_dispatch_seconds = 300
+repair_reconcile_seconds = 120
+notification_retry_limit = 5
+triage_priority_over_auto = true
+auto_pause_at_command_boundary = true
+queue_allowlisted_projects = []
+
+[triage]
+format_max_rounds = 3
+max_repair_commits = 3
+coverage_continuation_enabled = true
+coverage_continuation_max_attempts = 1
+pipeline_terminal_stabilization_seconds = 2.0
+max_hermes_calls_per_group = 4
+max_hermes_calls_total = 12
+max_investigations_per_group = 2
+no_progress_limit = 2
+max_blocker_corrections = 1
+pipeline_required_job_patterns = ["build", "coverage", "format", "merge_commit"]
+workspace_quarantine_max_copies = 3
+workspace_quarantine_retention_days = 7
+
+[repair_rollback]
+enabled = false
+cancel_reverts_pushed_commits = true
+require_author_actor = true
+require_exact_remote_head = true
+notify_on_success = true
+
+[repair_report]
+enabled = true
+max_input_tokens = 24000
+max_output_tokens = 1800
+max_files = 40
+max_hunks_per_file = 20
+max_lines_per_file = 400
+max_line_chars = 500
+model_timeout_seconds = 120
+max_active_per_worker = 1
+
+[repair_memory]
+capture_enabled = true
+retrieval_mode = "inject" # off, shadow, inject
+promotion_enabled = true
+project_allowlist = ["*"] # empty enables no project; "*" explicitly enables all projects
+max_hints = 3
+max_prompt_chars = 2000
+min_score = 60
+retrieval_timeout_ms = 75
+stale_days = 180
+global_min_projects = 2
+needs_review_min_attempts = 3
+needs_review_confidence = 0.45
+episode_retention_days = 365
+hit_retention_days = 365
+consolidation_batch_size = 50
+consolidation_lease_seconds = 300
+consolidation_model_timeout_seconds = 60
+consolidation_poll_seconds = 60
+embedding_service_url = "http://bge-m3-service:8080"
+embedding_model_name = "BAAI/bge-m3"
+embedding_model_revision = "5617a9f61b028005a4858fdac845db406aefb181"
+embedding_dimensions = 1024
+semantic_timeout_ms = 1500
+embedding_batch_timeout_seconds = 30.0
+embedding_batch_size = 16
+semantic_min_similarity = 0.55
+semantic_candidate_limit_per_scope = 500
+project_initial_confidence = 0.60
+global_initial_confidence = 0.70
+support_confidence_increment = 0.05
+success_confidence_increment = 0.03
+failure_confidence_decrement = 0.02
+
+[ci_failure_dashboard]
+capture_enabled = false
+tracking_started_at = "2026-08-20T00:00:00+08:00"
+trace_job_limit = 20
+trace_bytes_limit = 131072
+format_keywords = ["code_format_check", "format"]
+clang_keywords = ["clang", "clang-tidy"]
+coverage_keywords = ["coverage"]
+test_keywords = ["test", "pytest", "gtest", "unittest"]
+build_keywords = ["build", "compile", "cmake", "ninja", "link"]
+infrastructure_patterns = [
+    "connection timed out",
+    "connection reset",
+    "runner system failure",
+    "no space left on device",
+    "failed to pull image",
+    "service unavailable",
+    "temporary failure in name resolution",
+]
+reconcile_enabled = false
+reconcile_lookback_days = 30
+reconcile_max_mrs = 200
+reconcile_max_pipelines = 500
+reconcile_max_traces = 1000
+
+[feishu]
+app_id = "cli_aac77ad9b6785cf9" # Feishu App ID (recommended to set in .secrets.toml or FEISHU_APP_ID)
+app_secret = "r6rbcoRMROc9OouXg6N38gPja02PKCFv" # Feishu App Secret (recommended to set in .secrets.toml or FEISHU_APP_SECRET)
+identity_cache_ttl_seconds = 604800 # Cache Open ID to display-name lookups for seven days
+long_connection_enabled = true # Enable Feishu long-connection worker
+long_connection_auto_start = true # Auto-start worker inside gitlab_webhook service process
+long_connection_retry_seconds = 5 # Retry interval when ws client exits or fails to connect
+card_callback_timeout_seconds = 2.5 # Return button callbacks before Feishu's 3-second deadline
+card_callback_max_age_seconds = 300 # Reject delayed/replayed card callbacks older than 5 minutes
+email_domain = "" # e.g. "example.com": map gitlab username -> <username>@<domain> -> feishu open_id
+push_card_on_mr_open = false # deprecated: notifications now trigger on failed pipeline webhook instead of MR open
+notify_on_pipeline_failure = true # push a Feishu card only when the MR-related pipeline finishes with failed status
+update_triage_cards = true # update the originating pipeline-failure card as triage progresses
+triage_failure_explanations = true # show bounded confirmed/inferred reasons for terminal failed Jobs
+multi_action_repair_cards = true # keep all pipeline failure repair actions on one versioned card
+unified_pipeline_repair = true # expose one recoverable repair workflow; false restores category-specific buttons
+repair_card_mode = "multi_select" # multi_select, unified, or legacy_actions; affects newly created cards only
+triage_card_ttl_seconds = 2592000 # keep task/card correlation for 30 days
+repair_details_enabled = false # additive owner-details trial; existing cards stay unchanged when disabled
+repair_details_base_url = "" # public HTTP(S) origin; signing secret is environment-only
+repair_details_event_limit = 200 # cap per-task owner-facing progress events
+repair_details_retention_seconds = 2592000 # retain live progress for 30 days before SQLite-only fallback
+repair_details_heartbeat_seconds = 15 # SSE keepalive interval
+repair_details_diff_max_files = 30 # cap inline repair-diff files per task
+repair_details_diff_max_hunks_per_file = 20 # cap stored hunks for one changed file
+repair_details_diff_max_lines_per_file = 400 # cap stored diff lines for one changed file
+repair_details_diff_max_line_chars = 500 # truncate unusually long source lines in owner reports
+post_repair_ut_enabled = false # show an isolated UT action only after a fully successful Feishu repair
+post_repair_ut_coverage_threshold = 80.0 # hide the UT action when known changed-lines coverage meets this value
+pipeline_format_job_keywords = ["code_format_check", "format"] # failed jobs matching these keywords are treated as format failures
+pipeline_clang_job_keywords = ["clang", "clang-tidy"] # failed jobs matching these keywords are treated as clang failures
+pipeline_build_job_keywords = ["build", "compile", "cmake", "ninja", "coverage"] # failed jobs matching these keywords are treated as build failures
+
+[feishu.user_map] # optional static fallback mapping: gitlab_username -> feishu open_id
+# "some_gitlab_username" = "ou_xxxxxxxx"
+
 [azure_devops]
 default_comment_status = "closed"
 
@@ -393,4 +717,69 @@ pr_commands = [
     "/describe",
     "/review",
     "/improve",
+    "/ut",
 ]
+
+[prompt_evolution]
+enabled = true
+target_project = "example-group/example-project"
+target_branch = "main"
+branch_prefix = "codex/prompt-evolution"
+project_skill_branch_prefix = "codex/review-skill-evolution"
+project_skill_optimizer_enabled = true
+project_skill_optimizer_gate_mode = "enforce"
+project_skill_optimizer_edit_budget = 1
+project_skill_optimizer_max_edit_budget = 3
+project_skill_optimizer_selection_ratio = 0.25
+project_skill_optimizer_min_train_mrs = 2
+project_skill_optimizer_min_selection_mrs = 1
+project_skill_optimizer_min_control_cases = 1
+project_skill_optimizer_max_selection_cases = 20
+project_skill_optimizer_minimum_score_delta = 0.05
+project_skill_optimizer_rejected_buffer_size = 10
+project_skill_high_fidelity_enabled = true
+project_skill_high_fidelity_gate_mode = "enforce"
+project_skill_high_fidelity_min_mrs = 1
+project_skill_high_fidelity_max_mrs = 10
+global_prompt_high_fidelity_enabled = true
+global_prompt_high_fidelity_gate_mode = "enforce"
+global_prompt_high_fidelity_min_mrs = 1
+global_prompt_high_fidelity_max_mrs = 10
+global_prompt_high_fidelity_minimum_score_delta = 0.05
+project_skill_canary_enabled = false
+project_skill_canary_percent = 0
+project_skill_canary_approved_ref = ""
+window_days = 90
+unhandled_after_days = 14
+accepted_weight = 1.0
+rejected_weight = 1.0
+unhandled_weight = 0.25
+project_min_negative_weight = 3.0
+project_min_negative_ratio = 0.70
+project_min_mrs = 2
+unhandled_only_min_count = 12
+unhandled_only_min_mrs = 3
+global_min_negative_weight = 5.0
+global_min_negative_ratio = 0.70
+global_min_projects = 2
+global_min_mrs = 3
+closed_candidate_cooldown_days = 30
+max_candidates_per_run = 20
+max_files_per_mr = 20
+max_diff_lines = 600
+max_prompt_file_chars = 200000
+lease_seconds = 300
+models = [
+  "anthropic/claude-sonnet-5",
+  "anthropic/claude-opus-4-8",
+  "anthropic/claude-opus-4-6",
+]
+model_max_attempts = 2
+timezone = "Asia/Shanghai"
+weekday = "monday"
+hour = 3
+minute = 0
+poll_seconds = 60
+retry_interval_seconds = 900
+heartbeat_seconds = 30
+heartbeat_stale_seconds = 120

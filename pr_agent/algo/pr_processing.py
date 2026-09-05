@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import asyncio
+import random
+import time
 import traceback
-from typing import Callable, List, Tuple
+from dataclasses import dataclass
+from typing import Awaitable, Callable, List, Tuple
 
 from github import RateLimitExceededException
 
@@ -10,6 +14,13 @@ from pr_agent.algo.git_patch_processing import (
     extend_patch, handle_patch_deletions,
     decouple_and_convert_to_hunks_with_lines_numbers)
 from pr_agent.algo.language_handler import sort_files_by_main_languages
+from pr_agent.algo.model_resilience import (
+    ModelAttemptFailure,
+    ModelExhaustedError,
+    classify_model_failure,
+    is_transient_model_failure,
+    sanitize_model_error,
+)
 from pr_agent.algo.token_handler import TokenHandler
 from pr_agent.algo.types import EDIT_TYPE, FilePatchInfo
 from pr_agent.algo.utils import ModelType, clip_tokens, get_max_tokens, get_model
@@ -33,6 +44,84 @@ def cap_and_log_extra_lines(value, direction) -> int:
         get_logger().warning(f"patch_extra_lines_{direction} was {value}, capping to {MAX_EXTRA_LINES}")
         return MAX_EXTRA_LINES
     return value
+
+
+def _derive_local_roots(files: list[FilePatchInfo]) -> set[str]:
+    roots: set[str] = set()
+    try:
+        for f in files:
+            name = getattr(f, "filename", "") or ""
+            if not name:
+                continue
+            parts = name.replace("\\", "/").split("/")
+            if len(parts) > 1:
+                roots.add(parts[0])
+            else:
+                # file at repository root, use stem without extension
+                stem = parts[0].split(".")[0]
+                if stem:
+                    roots.add(stem)
+    except Exception:
+        pass
+    return roots
+
+
+def _strip_third_party_import_lines(patch: str, filename: str, local_roots: set[str]) -> str:
+    try:
+        if not get_settings().config.get("ignore_third_party_imports", False):
+            return patch
+        lang = (filename or "").lower()
+        is_py = lang.endswith(".py")
+        is_js = lang.endswith(".js") or lang.endswith(".jsx") or lang.endswith(".ts") or lang.endswith(".tsx")
+        if not (is_py or is_js):
+            return patch
+
+        lines = patch.splitlines()
+        out = []
+        for line in lines:
+            if not line or (line and line[0] not in "+ -@"):
+                out.append(line)
+                continue
+            if not line.startswith("+"):  # only strip newly added import lines
+                out.append(line)
+                continue
+
+            should_strip = False
+            if is_py:
+                m1 = re.match(r"^\+\s*import\s+([A-Za-z_][\w\.]*)", line)
+                m2 = re.match(r"^\+\s*from\s+([A-Za-z_][\w\.]*)\s+import\b", line)
+                mod = None
+                if m1:
+                    mod = m1.group(1)
+                elif m2:
+                    mod = m2.group(1)
+                if mod:
+                    if not mod.startswith("."):
+                        top = mod.split(".")[0]
+                        if local_roots and top not in local_roots:
+                            should_strip = True
+            elif is_js:
+                m1 = re.match(r'^\+\s*import\s+.*\s+from\s+["\']([^"\']+)["\']', line)
+                m2 = re.match(r'^\+\s*(?:const|let|var)\s+.*=\s*require\(\s*["\']([^"\']+)["\']\s*\)', line)
+                src = None
+                if m1:
+                    src = m1.group(1)
+                elif m2:
+                    src = m2.group(1)
+                if src:
+                    if src.startswith("./") or src.startswith("../"):
+                        should_strip = False
+                    else:
+                        first = src.split("/")[0]
+                        if local_roots and first not in local_roots:
+                            should_strip = True
+
+            if should_strip:
+                continue
+            out.append(line)
+        return "\n".join(out)
+    except Exception:
+        return patch
 
 
 def get_pr_diff(git_provider: GitProvider, token_handler: TokenHandler,
@@ -172,6 +261,14 @@ def pr_generate_extended_diff(pr_languages: list,
     total_tokens = token_handler.prompt_tokens  # initial tokens
     patches_extended = []
     patches_extended_tokens = []
+    # derive local roots once
+    try:
+        all_files = []
+        for lang in pr_languages:
+            all_files.extend(lang["files"])
+        local_roots = _derive_local_roots(all_files)
+    except Exception:
+        local_roots = set()
     for lang in pr_languages:
         for file in lang['files']:
             original_file_content_str = file.base_file
@@ -187,6 +284,9 @@ def pr_generate_extended_diff(pr_languages: list,
             if not extended_patch:
                 get_logger().warning(f"Failed to extend patch for file: {file.filename}")
                 continue
+
+            # strip third-party import additions
+            extended_patch = _strip_third_party_import_lines(extended_patch, file.filename, local_roots)
 
             if add_line_numbers_to_hunks:
                 full_extended_patch = decouple_and_convert_to_hunks_with_lines_numbers(extended_patch, file)
@@ -219,6 +319,11 @@ def pr_generate_compressed_diff(top_langs: list, token_handler: TokenHandler, mo
 
     # generate patches for each file, and count tokens
     file_dict = {}
+    # local roots for determining internal modules
+    try:
+        local_roots = _derive_local_roots(sorted_files)
+    except Exception:
+        local_roots = set()
     for file in sorted_files:
         original_file_content_str = file.base_file
         new_file_content_str = file.head_file
@@ -233,6 +338,9 @@ def pr_generate_compressed_diff(top_langs: list, token_handler: TokenHandler, mo
             if file.filename not in deleted_files_list:
                 deleted_files_list.append(file.filename)
             continue
+
+        # strip third-party import additions before line-number conversion
+        patch = _strip_third_party_import_lines(patch, file.filename, local_roots)
 
         if convert_hunks_to_line_numbers:
             patch = decouple_and_convert_to_hunks_with_lines_numbers(patch, file)
@@ -317,25 +425,108 @@ def generate_full_patch(convert_hunks_to_line_numbers, file_dict, max_tokens_mod
     return total_tokens, patches, remaining_files_list_new, files_in_patch_list
 
 
-async def retry_with_fallback_models(f: Callable, model_type: ModelType = ModelType.REGULAR):
-    all_models = _get_all_models(model_type)
-    all_deployments = _get_all_deployments(all_models)
-    # try each (model, deployment_id) pair until one is successful, otherwise raise exception
-    for i, (model, deployment_id) in enumerate(zip(all_models, all_deployments)):
-        try:
-            get_logger().debug(
-                f"Generating prediction with {model}"
-                f"{(' from deployment ' + deployment_id) if deployment_id else ''}"
-            )
-            get_settings().set("openai.deployment_id", deployment_id)
-            return await f(model)
-        except Exception as e:
-            get_logger().warning(
-                f"Failed to generate prediction with {model}",
-                artifact={"error": e},
-            )
-            if i == len(all_models) - 1:  # If it's the last iteration
-                raise Exception(f"Failed to generate prediction with any model of {all_models}") from e
+@dataclass(frozen=True)
+class ModelTarget:
+    model: str
+    deployment_id: str | None
+
+
+def model_provider_family(model: str) -> str:
+    normalized = str(model or "").strip().lower()
+    return normalized.split("/", 1)[0] if "/" in normalized else "openai"
+
+
+def _get_model_targets(model_type: ModelType, include_independent: bool) -> list[ModelTarget]:
+    ordinary_models = _get_all_models(model_type)
+    ordinary_deployments = _get_all_deployments(ordinary_models)
+    targets = [
+        ModelTarget(model, deployment)
+        for model, deployment in zip(ordinary_models, ordinary_deployments, strict=True)
+    ]
+    if include_independent:
+        independent = get_settings().get("config.independent_fallback_models", []) or []
+        if isinstance(independent, str):
+            independent = [item.strip() for item in independent.split(",") if item.strip()]
+        if not independent:
+            get_logger().warning("No independent fallback model is configured for suggestion generation")
+        primary_provider = model_provider_family(ordinary_models[0]) if ordinary_models else "openai"
+        for model_value in independent:
+            model = str(model_value).strip()
+            if not model:
+                continue
+            if model_provider_family(model) == primary_provider:
+                get_logger().warning(
+                    f"Ignoring independent fallback model {model}: provider matches the primary model"
+                )
+                continue
+            targets.append(ModelTarget(model, None))
+    return list(dict.fromkeys(targets))
+
+
+async def retry_with_fallback_models(
+    f: Callable,
+    model_type: ModelType = ModelType.REGULAR,
+    *,
+    retry_limit: int = 0,
+    include_independent: bool = False,
+    base_seconds: float = 1.0,
+    max_seconds: float = 8.0,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    jitter: Callable[[], float] = random.random,
+    on_failure: Callable[[ModelAttemptFailure], None] | None = None,
+):
+    targets = _get_model_targets(model_type, include_independent)
+    failures: list[ModelAttemptFailure] = []
+    last_error: Exception | None = None
+    original_deployment = get_settings().get("openai.deployment_id", None)
+    retry_limit = max(0, int(retry_limit))
+    try:
+        for target in targets:
+            attempt = 1
+            while True:
+                started_at = time.monotonic()
+                try:
+                    get_logger().debug(
+                        f"Generating prediction with {target.model}"
+                        f"{(' from a configured deployment' if target.deployment_id else '')}"
+                    )
+                    get_settings().set("openai.deployment_id", target.deployment_id)
+                    return await f(target.model)
+                except Exception as exc:
+                    last_error = exc
+                    kind = classify_model_failure(exc)
+                    failure = ModelAttemptFailure(
+                        model=target.model,
+                        deployment_id=target.deployment_id,
+                        attempt=attempt,
+                        kind=kind,
+                        message=sanitize_model_error(exc),
+                        elapsed_ms=max(0, int((time.monotonic() - started_at) * 1000)),
+                    )
+                    failures.append(failure)
+                    get_logger().warning(
+                        f"Model prediction failed: model={target.model} attempt={attempt} "
+                        f"kind={kind.value} error={failure.message}"
+                    )
+                    if on_failure is not None:
+                        try:
+                            on_failure(failure)
+                        except Exception as callback_error:
+                            get_logger().warning(
+                                f"Failed to record model attempt: {sanitize_model_error(callback_error)}"
+                            )
+                    if not is_transient_model_failure(kind) or attempt > retry_limit:
+                        break
+                    delay = min(max(0.0, max_seconds), max(0.0, base_seconds) * (2 ** (attempt - 1)))
+                    delay += max(0.0, float(jitter()))
+                    await sleep(delay)
+                    attempt += 1
+    finally:
+        get_settings().set("openai.deployment_id", original_deployment)
+    exhausted = ModelExhaustedError(tuple(failures))
+    if last_error is not None:
+        raise exhausted from last_error
+    raise exhausted
 
 
 def _get_all_models(model_type: ModelType = ModelType.REGULAR) -> List[str]:

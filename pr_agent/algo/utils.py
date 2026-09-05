@@ -21,13 +21,11 @@ import html2text
 import requests
 import yaml
 from pydantic import BaseModel
-from starlette_context import context
-
 from pr_agent.algo import MAX_TOKENS
 from pr_agent.algo.git_patch_processing import extract_hunk_lines_from_patch
 from pr_agent.algo.token_handler import TokenEncoder
 from pr_agent.algo.types import FilePatchInfo
-from pr_agent.config_loader import get_settings, global_settings
+from pr_agent.config_loader import get_settings
 from pr_agent.log import get_logger
 
 
@@ -77,9 +75,9 @@ class PRDescriptionHeader(str, Enum):
 def get_setting(key: str) -> Any:
     try:
         key = key.upper()
-        return context.get("settings", global_settings).get(key, global_settings.get(key, None))
+        return get_settings().get(key, None)
     except Exception:
-        return global_settings.get(key, None)
+        return None
 
 
 def emphasize_header(text: str, only_markdown=False, reference_link=None) -> str:
@@ -139,6 +137,7 @@ def convert_to_markdown_v2(output_data: dict,
         "Can be split": "🔀",
         "Key issues to review": "⚡",
         "Recommended focus areas for review": "⚡",
+        "Doc drift": "📄",
         "Score": "🏅",
         "Relevant tests": "🧪",
         "Focused PR": "✨",
@@ -152,16 +151,32 @@ def convert_to_markdown_v2(output_data: dict,
         "Ticket compliance check": "🎫",
     }
     markdown_text = ""
+    lang = str(get_settings().config.get("response_language", "en-US")).lower()
+    is_zh = lang.startswith("zh")
+    header_regular = "## PR Reviewer Guide" if not is_zh else "## PR 评审指南"
+    header_incremental = "## Incremental PR Reviewer Guide" if not is_zh else "## 增量 PR 评审指南"
+    intro_text = "Here are some key observations to aid the review process:" if not is_zh else "以下要点有助于评审："
+    est_effort_label = "Estimated effort to review" if not is_zh else "审查工作量估计"
+    no_tests = "No relevant tests" if not is_zh else "无相关测试"
+    has_tests = "PR contains tests" if not is_zh else "PR 包含测试"
+    contr_time_label = "Contribution time estimate" if not is_zh else "贡献时间估计"
+    contr_time_suffix = " (best, average, worst case): " if not is_zh else "（最佳/平均/最差）："
+    minutes_word = " minutes" if not is_zh else " 分钟"
+    no_security = "No security concerns identified" if not is_zh else "未发现安全隐患"
+    security_concerns = "Security concerns" if not is_zh else "安全隐患"
+    no_todo = "No TODO sections" if not is_zh else "没有 TODO 区块"
+    todo_sections = "TODO sections" if not is_zh else "TODO 区块"
+    rec_focus = "Recommended focus areas for review" if not is_zh else "建议重点关注的审查领域"
+    no_major = "No major issues detected" if not is_zh else "未发现重大问题"
+    no_doc_drift = "No documentation drift detected" if not is_zh else "未发现文档过期"
+    incr_note_prefix = "⏮️ Review for commits since previous PR-Agent review " if not is_zh else "⏮️ 基于上次 PR-Agent 评审后的提交进行评审 "
     if not incremental_review:
-        markdown_text += f"{PRReviewHeader.REGULAR.value} 🔍\n\n"
+        markdown_text += f"{header_regular} 🔍\n\n"
     else:
-        markdown_text += f"{PRReviewHeader.INCREMENTAL.value} 🔍\n\n"
-        markdown_text += f"⏮️ Review for commits since previous PR-Agent review {incremental_review}.\n\n"
+        markdown_text += f"{header_incremental} 🔍\n\n"
+        markdown_text += f"{incr_note_prefix}{incremental_review}.\n\n"
     if not output_data or not output_data.get('review', {}):
         return ""
-
-    if get_settings().get("pr_reviewer.enable_intro_text", False):
-        markdown_text += f"Here are some key observations to aid the review process:\n\n"
 
     if gfm_supported:
         markdown_text += "<table>\n"
@@ -169,7 +184,7 @@ def convert_to_markdown_v2(output_data: dict,
     todo_summary = output_data['review'].pop('todo_summary', '')
     for key, value in output_data['review'].items():
         if value is None or value == '' or value == {} or value == []:
-            if key.lower() not in ['can_be_split', 'key_issues_to_review']:
+            if key.lower() not in ['can_be_split', 'key_issues_to_review', 'doc_drift']:
                 continue
         key_nice = key.replace('_', ' ').capitalize()
         emoji = emojis.get(key_nice, "")
@@ -188,67 +203,88 @@ def convert_to_markdown_v2(output_data: dict,
             value = f"{value_int} {blue_bars}{white_bars}"
             if gfm_supported:
                 markdown_text += f"<tr><td>"
-                markdown_text += f"{emoji}&nbsp;<strong>{key_nice}</strong>: {value}"
+                markdown_text += f"{emoji}&nbsp;<strong>{est_effort_label}</strong>: {value}"
                 markdown_text += f"</td></tr>\n"
             else:
-                markdown_text += f"### {emoji} {key_nice}: {value}\n\n"
+                markdown_text += f"### {emoji} {est_effort_label}: {value}\n\n"
         elif 'relevant tests' in key_nice.lower():
-            value = str(value).strip().lower()
-            if gfm_supported:
-                markdown_text += f"<tr><td>"
-                if is_value_no(value):
-                    markdown_text += f"{emoji}&nbsp;<strong>No relevant tests</strong>"
-                else:
-                    markdown_text += f"{emoji}&nbsp;<strong>PR contains tests</strong>"
-                markdown_text += f"</td></tr>\n"
-            else:
-                if is_value_no(value):
-                    markdown_text += f'### {emoji} No relevant tests\n\n'
-                else:
-                    markdown_text += f"### {emoji} PR contains tests\n\n"
+            # relevant_tests cell removed by request; ignore any value returned by the model.
+            continue
         elif 'ticket compliance check' in key_nice.lower():
             markdown_text = ticket_markdown_logic(emoji, markdown_text, value, gfm_supported)
         elif 'contribution time cost estimate' in key_nice.lower():
             if gfm_supported:
-                markdown_text += f"<tr><td>{emoji}&nbsp;<strong>Contribution time estimate</strong> (best, average, worst case): "
-                markdown_text += f"{value['best_case'].replace('m', ' minutes')} | {value['average_case'].replace('m', ' minutes')} | {value['worst_case'].replace('m', ' minutes')}"
+                markdown_text += f"<tr><td>{emoji}&nbsp;<strong>{contr_time_label}</strong>{contr_time_suffix}"
+                markdown_text += f"{value['best_case'].replace('m', minutes_word)} | {value['average_case'].replace('m', minutes_word)} | {value['worst_case'].replace('m', minutes_word)}"
                 markdown_text += f"</td></tr>\n"
             else:
-                markdown_text += f"### {emoji} Contribution time estimate (best, average, worst case): "
-                markdown_text += f"{value['best_case'].replace('m', ' minutes')} | {value['average_case'].replace('m', ' minutes')} | {value['worst_case'].replace('m', ' minutes')}\n\n"
+                markdown_text += f"### {emoji} {contr_time_label}{contr_time_suffix}"
+                markdown_text += f"{value['best_case'].replace('m', minutes_word)} | {value['average_case'].replace('m', minutes_word)} | {value['worst_case'].replace('m', minutes_word)}\n\n"
         elif 'security concerns' in key_nice.lower():
             if gfm_supported:
                 markdown_text += f"<tr><td>"
                 if is_value_no(value):
-                    markdown_text += f"{emoji}&nbsp;<strong>No security concerns identified</strong>"
+                    markdown_text += f"{emoji}&nbsp;<strong>{no_security}</strong>"
                 else:
-                    markdown_text += f"{emoji}&nbsp;<strong>Security concerns</strong><br><br>\n\n"
+                    markdown_text += f"{emoji}&nbsp;<strong>{security_concerns}</strong><br><br>\n\n"
                     value = emphasize_header(value.strip())
                     markdown_text += f"{value}"
                 markdown_text += f"</td></tr>\n"
             else:
                 if is_value_no(value):
-                    markdown_text += f'### {emoji} No security concerns identified\n\n'
+                    markdown_text += f"### {emoji} {no_security}\n\n"
                 else:
-                    markdown_text += f"### {emoji} Security concerns\n\n"
+                    markdown_text += f"### {emoji} {security_concerns}\n\n"
                     value = emphasize_header(value.strip(), only_markdown=True)
                     markdown_text += f"{value}\n\n"
+        elif 'doc drift' in key_nice.lower():
+            # value is [] (no drift) or list[dict] of stale docs (already filtered/sorted)
+            if gfm_supported:
+                markdown_text += f"<tr><td>"
+                if not value:
+                    markdown_text += f"📖&nbsp;<strong>{no_doc_drift}</strong>"
+                else:
+                    from pr_agent.tools.doc_drift_report import _render_doc_block, make_link_builder
+                    _lb = make_link_builder(git_provider) if git_provider else None
+                    _count = len(value)
+                    if is_zh:
+                        _summary = f"📄 发现 {_count} 处文档可能过期 · 点击展开"
+                    else:
+                        _summary = f"📄 {_count} doc(s) may be stale · click to expand"
+                    _inner = "<ul type=\"none\">\n" + \
+                        "\n".join(_render_doc_block(r, is_zh, _lb, as_list_item=True) for r in value) + \
+                        "\n</ul>"
+                    markdown_text += f"<details><summary>{_summary}</summary>\n\n{_inner}\n</details>"
+                markdown_text += f"</td></tr>\n"
+            else:
+                if not value:
+                    markdown_text += f"### 📖 {no_doc_drift}\n\n"
+                else:
+                    from pr_agent.tools.doc_drift_report import _render_doc_block, make_link_builder
+                    _lb = make_link_builder(git_provider) if git_provider else None
+                    _sev_icon = {"high": "🔴", "medium": "🟡", "low": "⚪"}
+                    _highest = _sev_icon.get(str(value[0].get("severity", "medium")).lower(), "🟡")
+                    _count = len(value)
+                    _label = "发现文档可能过期" if is_zh else "Documentation drift detected"
+                    markdown_text += f"### 📄 {_label} ({_count}, highest {_highest})\n\n"
+                    for r in value:
+                        markdown_text += _render_doc_block(r, is_zh, _lb) + "\n\n"
         elif 'todo sections' in key_nice.lower():
             if gfm_supported:
                 markdown_text += "<tr><td>"
                 if is_value_no(value):
-                    markdown_text += f"✅&nbsp;<strong>No TODO sections</strong>"
+                    markdown_text += f"✅&nbsp;<strong>{no_todo}</strong>"
                 else:
                     markdown_todo_items = format_todo_items(value, git_provider, gfm_supported)
-                    markdown_text += f"{emoji}&nbsp;<strong>TODO sections</strong>\n<br><br>\n"
+                    markdown_text += f"{emoji}&nbsp;<strong>{todo_sections}</strong>\n<br><br>\n"
                     markdown_text += markdown_todo_items
                 markdown_text += "</td></tr>\n"
             else:
                 if is_value_no(value):
-                    markdown_text += f"### ✅ No TODO sections\n\n"
+                    markdown_text += f"### ✅ {no_todo}\n\n"
                 else:
                     markdown_todo_items = format_todo_items(value, git_provider, gfm_supported)
-                    markdown_text += f"### {emoji} TODO sections\n\n"
+                    markdown_text += f"### {emoji} {todo_sections}\n\n"
                     markdown_text += markdown_todo_items
         elif 'can be split' in key_nice.lower():
             if gfm_supported:
@@ -260,18 +296,22 @@ def convert_to_markdown_v2(output_data: dict,
             if is_value_no(value):
                 if gfm_supported:
                     markdown_text += f"<tr><td>"
-                    markdown_text += f"{emoji}&nbsp;<strong>No major issues detected</strong>"
+                    markdown_text += f"{emoji}&nbsp;<strong>{no_major}</strong>"
                     markdown_text += f"</td></tr>\n"
                 else:
-                    markdown_text += f"### {emoji} No major issues detected\n\n"
+                    markdown_text += f"### {emoji} {no_major}\n\n"
             else:
                 issues = value
                 if gfm_supported:
+                    _issue_count = len(issues) if isinstance(issues, list) else 0
+                    if is_zh:
+                        _focus_summary = f"{emoji}&nbsp;建议重点关注的审查领域（{_issue_count}）· 点击展开"
+                    else:
+                        _focus_summary = f"{emoji}&nbsp;Recommended focus areas for review ({_issue_count}) · click to expand"
                     markdown_text += f"<tr><td>"
-                    # markdown_text += f"{emoji}&nbsp;<strong>{key_nice}</strong><br><br>\n\n"
-                    markdown_text += f"{emoji}&nbsp;<strong>Recommended focus areas for review</strong><br><br>\n\n"
+                    markdown_text += f"<details><summary>{_focus_summary}</summary>\n<ul type=\"none\">\n"
                 else:
-                    markdown_text += f"### {emoji} Recommended focus areas for review\n\n#### \n"
+                    markdown_text += f"### {emoji} {rec_focus}\n\n#### \n"
                 for i, issue in enumerate(issues):
                     try:
                         if not issue or not isinstance(issue, dict):
@@ -279,7 +319,7 @@ def convert_to_markdown_v2(output_data: dict,
                         relevant_file = issue.get('relevant_file', '').strip()
                         issue_header = issue.get('issue_header', '').strip()
                         if issue_header.lower() == 'possible bug':
-                            issue_header = 'Possible Issue'  # Make the header less frightening
+                            issue_header = 'Possible Issue' if not is_zh else '可能问题'
                         issue_content = issue.get('issue_content', '').strip()
                         start_line = int(str(issue.get('start_line', 0)).strip())
                         end_line = int(str(issue.get('end_line', 0)).strip())
@@ -293,20 +333,21 @@ def convert_to_markdown_v2(output_data: dict,
                         if gfm_supported:
                             if reference_link is not None and len(reference_link) > 0:
                                 if relevant_lines_str:
-                                    issue_str = f"<details><summary><a href='{reference_link}'><strong>{issue_header}</strong></a>\n\n{issue_content}\n</summary>\n\n{relevant_lines_str}\n\n</details>"
+                                    issue_str = f"<li><details><summary><a href='{reference_link}'><strong>{issue_header}</strong></a><br>{issue_content}</summary>\n\n{relevant_lines_str}\n\n</details></li>"
                                 else:
-                                    issue_str = f"<a href='{reference_link}'><strong>{issue_header}</strong></a><br>{issue_content}"
+                                    issue_str = f"<li><a href='{reference_link}'><strong>{issue_header}</strong></a><br>{issue_content}</li>"
                             else:
-                                issue_str = f"<strong>{issue_header}</strong><br>{issue_content}"
+                                issue_str = f"<li><strong>{issue_header}</strong><br>{issue_content}</li>"
                         else:
                             if reference_link is not None and len(reference_link) > 0:
                                 issue_str = f"[**{issue_header}**]({reference_link})\n\n{issue_content}\n\n"
                             else:
                                 issue_str = f"**{issue_header}**\n\n{issue_content}\n\n"
-                        markdown_text += f"{issue_str}\n\n"
+                        markdown_text += f"{issue_str}"
                     except Exception as e:
                         get_logger().exception(f"Failed to process 'Recommended focus areas for review': {e}")
                 if gfm_supported:
+                    markdown_text += f"\n</ul>\n</details>"
                     markdown_text += f"</td></tr>\n"
         else:
             if gfm_supported:
@@ -317,6 +358,27 @@ def convert_to_markdown_v2(output_data: dict,
                 markdown_text += f"### {emoji} {key_nice}: {value}\n\n"
 
     if gfm_supported:
+        # Pad the last cell with invisible trailing whitespace so this
+        # (otherwise narrow, single-column) table visually spans the same
+        # width as the /improve suggestions table below it. This mirrors
+        # the exact technique pr_code_suggestions.py already uses for its
+        # header cell (see the "&nbsp; " * delta line there).
+        #
+        # A <table width="100%"> attribute alone does NOT work: GitLab's own
+        # site stylesheet (framework/typography.scss) applies
+        # ".md table:not(.code) { width: auto }" to every rendered markdown
+        # table, and that author-stylesheet rule always overrides an HTML
+        # presentational "width" attribute in the CSS cascade. Since
+        # "width: auto" means "size to content", the only way to force a
+        # wider table is to widen its actual (rendered) content -- hence the
+        # padding. A hidden/invisible element doesn't work either: GitLab's
+        # markdown sanitizer strips "style"/"class"/"hidden" attributes
+        # entirely (verified via POST /api/v4/markdown), so there is no way
+        # to pad invisibly other than literal blank characters.
+        pad = "&nbsp; " * 66
+        last_td_close = markdown_text.rfind("</td>")
+        if last_td_close != -1:
+            markdown_text = markdown_text[:last_td_close] + pad + markdown_text[last_td_close:]
         markdown_text += "</table>\n"
 
     return markdown_text
@@ -1322,19 +1384,32 @@ def process_description(description_full: str) -> Tuple[str, List]:
         return "", []
 
     # description_split = description_full.split(PRDescriptionHeader.FILE_WALKTHROUGH.value)
-    if PRDescriptionHeader.FILE_WALKTHROUGH.value in description_full:
+    file_walkthrough_headers = (PRDescriptionHeader.FILE_WALKTHROUGH.value, "文件详解")
+    if any(header in description_full for header in file_walkthrough_headers):
         try:
-            # FILE_WALKTHROUGH are presented in a collapsible section in the description
-            regex_pattern = r'<details.*?>\s*<summary>\s*<h3>\s*' + re.escape(PRDescriptionHeader.FILE_WALKTHROUGH.value) + r'\s*</h3>\s*</summary>'
-            description_split = re.split(regex_pattern, description_full, maxsplit=1, flags=re.DOTALL)
+            regex_patterns = [
+                r'<details.*?>\s*<summary>\s*<h3>\s*' + re.escape(PRDescriptionHeader.FILE_WALKTHROUGH.value) + r'\s*</h3>\s*</summary>',
+                r'###\s*\*\*\s*' + re.escape(PRDescriptionHeader.FILE_WALKTHROUGH.value) + r'\s*\*\*\s*\n\s*<details.*?>\s*<summary>.*?</summary>',
+                r'###\s*\*\*\s*文件详解\s*\*\*\s*\n\s*<details.*?>\s*<summary>.*?</summary>',
+                r'<details.*?>\s*<summary>\s*<h3>\s*文件详解\s*</h3>\s*</summary>',
+            ]
+            description_split = [description_full]
+            for regex_pattern in regex_patterns:
+                description_split = re.split(regex_pattern, description_full, maxsplit=1, flags=re.DOTALL)
+                if len(description_split) > 1:
+                    break
 
             # If the regex pattern is not found, fallback to the previous method
             if len(description_split) == 1:
                 get_logger().debug("Could not find regex pattern for file walkthrough, falling back to simple split")
-                description_split = description_full.split(PRDescriptionHeader.FILE_WALKTHROUGH.value, 1)
+                for header in file_walkthrough_headers:
+                    if header in description_full:
+                        description_split = description_full.split(header, 1)
+                        if len(description_split) > 1:
+                            break
         except Exception as e:
             get_logger().warning(f"Failed to split description using regex, falling back to simple split: {e}")
-            description_split = description_full.split(PRDescriptionHeader.FILE_WALKTHROUGH.value, 1)
+            description_split = description_full.split(file_walkthrough_headers[0], 1)
 
         if len(description_split) < 2:
             get_logger().error("Failed to split description into base and changes walkthrough", artifact={'description': description_full})

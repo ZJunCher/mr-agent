@@ -198,74 +198,53 @@ class PRHelpMessage:
                 relevant_configs = {'pr_help': dict(get_settings().pr_help),
                                     'config': dict(get_settings().config)}
                 get_logger().debug("Relevant configs", artifacts=relevant_configs)
-                pr_comment = "## PR Agent Walkthrough 🤖\n\n"
-                pr_comment += "Welcome to the PR Agent, an AI-powered tool for automated pull request analysis, feedback, suggestions and more."""
-                pr_comment += "\n\nHere is a list of tools you can use to interact with the PR Agent:\n"
-                base_path = "https://pr-agent-docs.codium.ai/tools"
+                use_collapsible_help = self.git_provider.is_supported("gfm_markdown") and get_settings().pr_help.get("collapsed_output", True)
+                if use_collapsible_help:
+                    pr_comment = "<details><summary><h2>PR-Agent 使用指引 🤖</h2></summary>\n\n"
+                else:
+                    pr_comment = "## PR-Agent 使用指引 🤖\n\n"
+
 
                 tool_names = []
-                tool_names.append(f"[DESCRIBE]({base_path}/describe/)")
-                tool_names.append(f"[REVIEW]({base_path}/review/)")
-                tool_names.append(f"[IMPROVE]({base_path}/improve/)")
-                tool_names.append(f"[UPDATE CHANGELOG]({base_path}/update_changelog/)")
-                tool_names.append(f"[HELP DOCS]({base_path}/help_docs/)")
-                tool_names.append(f"[ADD DOCS]({base_path}/documentation/) 💎")
-                tool_names.append(f"[TEST]({base_path}/test/) 💎")
-                tool_names.append(f"[IMPROVE COMPONENT]({base_path}/improve_component/) 💎")
-                tool_names.append(f"[ANALYZE]({base_path}/analyze/) 💎")
-                tool_names.append(f"[ASK]({base_path}/ask/)")
-                tool_names.append(f"[GENERATE CUSTOM LABELS]({base_path}/custom_labels/) 💎")
-                tool_names.append(f"[CI FEEDBACK]({base_path}/ci_feedback/) 💎")
-                tool_names.append(f"[CUSTOM PROMPT]({base_path}/custom_prompt/) 💎")
-                tool_names.append(f"[IMPLEMENT]({base_path}/implement/) 💎")
+                tool_names.append(f"[DESCRIBE]")
+                tool_names.append(f"[REVIEW]")
+                tool_names.append(f"[IMPROVE]")
+                tool_names.append(f"[ASK]")
+                tool_names.append(f"[ASK FOR LINES]")
+                tool_names.append(f"[HELP]")
+                tool_names.append(f"[FEISHU REVIEW]")
 
                 descriptions = []
-                descriptions.append("Generates PR description - title, type, summary, code walkthrough and labels")
-                descriptions.append("Adjustable feedback about the PR, possible issues, security concerns, review effort and more")
-                descriptions.append("Code suggestions for improving the PR")
-                descriptions.append("Automatically updates the changelog")
-                descriptions.append("Answers a question regarding this repository, or a given one, based on given documentation path")
-                descriptions.append("Generates documentation to methods/functions/classes that changed in the PR")
-                descriptions.append("Generates unit tests for a specific component, based on the PR code change")
-                descriptions.append("Code suggestions for a specific component that changed in the PR")
-                descriptions.append("Identifies code components that changed in the PR, and enables to interactively generate tests, docs, and code suggestions for each component")
-                descriptions.append("Answering free-text questions about the PR")
-                descriptions.append("Automatically retrieves and presents similar issues")
-                descriptions.append("Generates custom labels for the PR, based on specific guidelines defined by the user")
-                descriptions.append("Generates feedback and analysis for a failed CI job")
-                descriptions.append("Generates custom suggestions for improving the PR code, derived only from a specific guidelines prompt defined by the user")
-                descriptions.append("Generates implementation code from review suggestions")
+                descriptions.append("生成 PR 描述 - 标题、类型、摘要、代码概览和标签")
+                descriptions.append("扫描 CR 代码变更，并生成关于 CR 的反馈，旨在辅助代码审查过程")
+                descriptions.append("扫描 CR 代码的更改，并自动生成有意义的 CR 代码改进建议")
+                descriptions.append("根据 CR 代码的更改来回答有关 PR 的问题")
+                descriptions.append("在diff页面中进行行提问")
+                descriptions.append("展示现有指令和自定义 prompt 的模板")
+                descriptions.append("发送 MR 审批消息给指定审批人")
 
                 commands  =[]
                 commands.append("`/describe`")
                 commands.append("`/review`")
                 commands.append("`/improve`")
-                commands.append("`/update_changelog`")
-                commands.append("`/help_docs`")
-                commands.append("`/add_docs`")
-                commands.append("`/test`")
-                commands.append("`/improve_component`")
-                commands.append("`/analyze`")
                 commands.append("`/ask`")
-                commands.append("`/generate_labels`")
-                commands.append("`/checks`")
-                commands.append("`/custom_prompt`")
-                commands.append("`/implement`")
+                commands.append("`/ask`")
+                commands.append("`/help`")
+                commands.append("`/feishu-review @reviewer`")
+
+                examples = []
+                examples.append("`/describe`")
+                examples.append("`/review`")
+                examples.append("`/improve`")
+                examples.append("`/ask 这个接口是否符合 ROS2 规范？`")
+                examples.append("`/ask 你的问题`<br> - 进入「变更」页面<br> - 单行：点击行左侧「评论图标」<br> - 多行：拉动行左侧「评论图标」选择多行后评论<br> - 输入 `/ask 问题` 并点击「立即添加评论」")
+                examples.append("`/help`")
+                examples.append("`/feishu-review @张三`")
 
                 checkbox_list = []
                 checkbox_list.append(" - [ ] Run <!-- /describe -->")
                 checkbox_list.append(" - [ ] Run <!-- /review -->")
                 checkbox_list.append(" - [ ] Run <!-- /improve -->")
-                checkbox_list.append(" - [ ] Run <!-- /update_changelog -->")
-                checkbox_list.append(" - [ ] Run <!-- /help_docs -->")
-                checkbox_list.append(" - [ ] Run <!-- /add_docs -->")
-                checkbox_list.append(" - [ ] Run <!-- /test -->")
-                checkbox_list.append(" - [ ] Run <!-- /improve_component -->")
-                checkbox_list.append(" - [ ] Run <!-- /analyze -->")
-                checkbox_list.append("[*]")
-                checkbox_list.append("[*]")
-                checkbox_list.append("[*]")
-                checkbox_list.append("[*]")
                 checkbox_list.append("[*]")
                 checkbox_list.append("[*]")
                 checkbox_list.append("[*]")
@@ -273,24 +252,33 @@ class PRHelpMessage:
                 checkbox_list.append("[*]")
 
                 if isinstance(self.git_provider, GithubProvider) and not get_settings().config.get('disable_checkboxes', False):
-                    pr_comment += f"<table><tr align='left'><th align='left'>Tool</th><th align='left'>Description</th><th align='left'>Trigger Interactively :gem:</th></tr>"
+                    th1 = "工具"
+                    th2 = "说明"
+                    th3 = "交互触发 :gem:"
+                    th4 = "使用示例"
+                    pr_comment += f"<table><tr align='left'><th align='left'>{th1}</th><th align='left'>{th2}</th><th align='left'>{th3}</th><th align='left'>{th4}</th></tr>"
                     for i in range(len(tool_names)):
-                        pr_comment += f"\n<tr><td align='left'>\n\n<strong>{tool_names[i]}</strong></td>\n<td>{descriptions[i]}</td>\n<td>\n\n{checkbox_list[i]}\n</td></tr>"
+                        pr_comment += f"\n<tr><td align='left'>\n\n<strong>{tool_names[i]}</strong></td>\n<td>{descriptions[i]}</td>\n<td>\n\n{checkbox_list[i]}\n</td><td>{examples[i]}</td></tr>"
                     pr_comment += "</table>\n\n"
-                    pr_comment += f"""\n\n(1) Note that each tool can be [triggered automatically](https://pr-agent-docs.codium.ai/usage-guide/automations_and_usage/#github-app-automatic-tools-when-a-new-pr-is-opened) when a new PR is opened, or called manually by [commenting on a PR](https://pr-agent-docs.codium.ai/usage-guide/automations_and_usage/#online-usage)."""
-                    pr_comment += f"""\n\n(2) Tools marked with [*] require additional parameters to be passed. For example, to invoke the `/ask` tool, you need to comment on a PR: `/ask "<question content>"`. See the relevant documentation for each tool for more details."""
                 elif isinstance(self.git_provider, BitbucketServerProvider):
                     # only support basic commands in BBDC
                     pr_comment = generate_bbdc_table(tool_names[:4], descriptions[:4])
                 else:
-                    pr_comment += f"<table><tr align='left'><th align='left'>Tool</th><th align='left'>Command</th><th align='left'>Description</th></tr>"
+                    th1 = "工具"
+                    th2 = "命令"
+                    th3 = "说明"
+                    th4 = "使用示例"
+                    pr_comment += f"<table><tr align='left'><th align='left'>{th1}</th><th align='left'>{th2}</th><th align='left'>{th3}</th><th align='left'>{th4}</th></tr>"
                     for i in range(len(tool_names)):
-                        pr_comment += f"\n<tr><td align='left'>\n\n<strong>{tool_names[i]}</strong></td><td>{commands[i]}</td><td>{descriptions[i]}</td></tr>"
+                        pr_comment += f"\n<tr><td align='left'>\n\n<strong>{tool_names[i]}</strong></td><td>{commands[i]}</td><td>{descriptions[i]}</td><td>{examples[i]}</td></tr>"
                     pr_comment += "</table>\n\n"
-                    pr_comment += f"""\n\nNote that each tool can be [invoked automatically](https://pr-agent-docs.codium.ai/usage-guide/automations_and_usage/) when a new PR is opened, or called manually by [commenting on a PR](https://pr-agent-docs.codium.ai/usage-guide/automations_and_usage/#online-usage)."""
-
+                if use_collapsible_help:
+                    pr_comment += "</details>\n"
                 if get_settings().config.publish_output:
                     self.git_provider.publish_comment(pr_comment)
+                else:
+                    get_logger().debug("PR help message prepared (not published)", artifact=pr_comment)
+                    get_settings().data = {"artifact": pr_comment}
         except Exception as e:
             get_logger().exception(f"Error while running PRHelpMessage: {e}")
         return ""
@@ -318,7 +306,7 @@ class PRHelpMessage:
 
 def generate_bbdc_table(column_arr_1, column_arr_2):
     # Generating header row
-    header_row = "| Tool  | Description | \n"
+    header_row = "| 工具 | 说明 |\n"
 
     # Generating separator row
     separator_row = "|--|--|\n"

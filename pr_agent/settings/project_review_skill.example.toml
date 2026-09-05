@@ -1,0 +1,28 @@
+schema_version = 1
+name = "cook-review"
+project = "eabot/cook"
+description = "Project-owned rules for PR-Agent review and improve"
+
+[[rules]]
+id = "api-compatibility"
+targets = ["review", "improve"]
+languages = ["cpp"]
+paths = ["src/**"]
+exclude_paths = ["src/generated/**"]
+instruction = "Public API changes must preserve backward compatibility."
+references = ["references/api-compatibility.md"]
+
+[[rules]]
+id = "realtime-no-blocking-io"
+targets = ["review", "improve"]
+languages = ["cpp"]
+paths = ["src/realtime/**"]
+instruction = "Realtime threads must not perform blocking IO."
+
+[[rules]]
+id = "python-error-contract"
+targets = ["review", "improve"]
+languages = ["python"]
+paths = ["services/**"]
+exclude_paths = ["services/generated/**"]
+instruction = "Service errors must preserve the project's public error contract."

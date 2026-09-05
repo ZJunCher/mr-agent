@@ -3,12 +3,13 @@ import litellm
 import openai
 import requests
 from litellm import acompletion
-from tenacity import retry, retry_if_exception_type, retry_if_not_exception_type, stop_after_attempt
+from tenacity import retry, retry_if_exception_type, retry_if_not_exception_type, stop_after_attempt, RetryError
 
 from pr_agent.algo import CLAUDE_EXTENDED_THINKING_MODELS, NO_SUPPORT_TEMPERATURE_MODELS, SUPPORT_REASONING_EFFORT_MODELS, USER_MESSAGE_ONLY_MODELS, STREAMING_REQUIRED_MODELS
 from pr_agent.algo.ai_handlers.base_ai_handler import BaseAiHandler
 from pr_agent.algo.ai_handlers.litellm_helpers import _handle_streaming_response, MockResponse, _get_azure_ad_token, \
     _process_litellm_extra_body
+from pr_agent.algo.llm_feedback import record_llm_feedback
 from pr_agent.algo.utils import ReasoningEffort, get_version
 from pr_agent.config_loader import get_settings
 from pr_agent.log import get_logger
@@ -150,6 +151,20 @@ class LiteLLMAIHandler(BaseAiHandler):
         # Models that require streaming
         self.streaming_required_models = STREAMING_REQUIRED_MODELS
 
+    def _resolve_endpoint(self, model: str):
+        """Route to the matching relay station per-call based on the model name.
+
+        glm-* models go through the EABOT OpenAI-compatible relay; everything
+        else (e.g. anthropic/claude-*) keeps using the Anthropic relay set on
+        ``self.api_base`` / ``ANTHROPIC.KEY``. Returns (api_base, api_key).
+        """
+        if model and "glm" in model.lower():
+            return (
+                get_settings().get("EABOT.API_BASE"),
+                get_settings().get("EABOT.KEY"),
+            )
+        return self.api_base, get_settings().get("ANTHROPIC.KEY")
+
     def prepare_logs(self, response, system, user, resp, finish_reason):
         response_log = response.dict().copy()
         response_log['system'] = system
@@ -264,7 +279,7 @@ class LiteLLMAIHandler(BaseAiHandler):
         retry=retry_if_exception_type(openai.APIError) & retry_if_not_exception_type(openai.RateLimitError),
         stop=stop_after_attempt(MODEL_RETRIES),
     )
-    async def chat_completion(self, model: str, system: str, user: str, temperature: float = 0.2, img_path: str = None):
+    async def _chat_completion_impl(self, model: str, system: str, user: str, temperature: float = 0.2, img_path: str = None):
         try:
             resp, finish_reason = None, None
             deployment_id = self.deployment_id
@@ -311,20 +326,24 @@ class LiteLLMAIHandler(BaseAiHandler):
                 system = ""
                 get_logger().info(f"Using model {model}, combining system and user prompts")
                 messages = [{"role": "user", "content": user}]
+                api_base, api_key = self._resolve_endpoint(model)
                 kwargs = {
                     "model": model,
                     "deployment_id": deployment_id,
                     "messages": messages,
                     "timeout": get_settings().config.ai_timeout,
-                    "api_base": self.api_base,
+                    "api_base": api_base,
+                    "api_key": api_key,
                 }
             else:
+                api_base, api_key = self._resolve_endpoint(model)
                 kwargs = {
                     "model": model,
                     "deployment_id": deployment_id,
                     "messages": messages,
                     "timeout": get_settings().config.ai_timeout,
-                    "api_base": self.api_base,
+                    "api_base": api_base,
+                    "api_key": api_key,
                 }
 
             # Add temperature only if model supports it
@@ -410,6 +429,29 @@ class LiteLLMAIHandler(BaseAiHandler):
             get_logger().info(f"\nAI response:\n{resp}")
 
         return resp, finish_reason
+
+    async def chat_completion(self, model: str, system: str, user: str, temperature: float = 0.2, img_path: str = None):
+        """Public entry point. Retries transparently via ``_chat_completion_impl``
+        (tenacity-decorated) and only records LLM feedback -- surfaced to users
+        as the "LLM 调用状态提示" warning -- once every retry attempt has been
+        exhausted. A transient failure followed by a successful retry must not
+        alarm the user; only report when the call genuinely never succeeded.
+        """
+        try:
+            return await self._chat_completion_impl(model, system, user, temperature, img_path)
+        except RetryError as e:
+            last_exception = e.last_attempt.exception() if e.last_attempt else None
+            record_llm_feedback(last_exception or e)
+            raise
+        except openai.RateLimitError as e:
+            # Not retried (excluded from the retry predicate), so this is
+            # always the final/only attempt -- record immediately.
+            record_llm_feedback(e)
+            raise
+        except Exception as e:
+            # Safety net for any exception shape not covered above.
+            record_llm_feedback(e)
+            raise
 
     async def _get_completion(self, **kwargs):
         """
