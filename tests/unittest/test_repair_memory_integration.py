@@ -233,7 +233,7 @@ def test_compose_runs_one_internal_bge_service_without_a_host_port():
     model_service = services["bge-m3-service"]
     assert model_service["build"] == {"context": ".", "dockerfile": "docker/Dockerfile.embedding"}
     assert "ports" not in model_service
-    assert model_service["volumes"] == ["/srv/mr-agent/data/models:/models:ro"]
+    assert model_service["volumes"] == ["${MR_AGENT_HOME:-./runtime}/data/models:/models:ro"]
     assert model_service["restart"] == "unless-stopped"
     assert model_service["healthcheck"]["test"][0:2] == ["CMD", "python"]
     assert model_service["cpus"]
@@ -257,7 +257,7 @@ def test_compose_model_initializer_is_explicit_writable_and_one_shot():
 
     assert initializer["build"] == {"context": ".", "dockerfile": "docker/Dockerfile.embedding"}
     assert initializer["profiles"] == ["model-init"]
-    assert initializer["volumes"] == ["/srv/mr-agent/data/models:/models"]
+    assert initializer["volumes"] == ["${MR_AGENT_HOME:-./runtime}/data/models:/models"]
     assert initializer["restart"] == "no"
     assert "ports" not in initializer
     assert initializer["command"] == ["python", "scripts/download_bge_m3.py", "--target", "/models"]

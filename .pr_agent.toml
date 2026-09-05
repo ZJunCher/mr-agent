@@ -1,20 +1,376 @@
-[pr_reviewer]
-enable_review_labels_effort = true
-enable_auto_approval = true
+# .pr_agent.toml 模板（示例文件）
+# - PR-Agent 会从仓库默认分支根目录读取此文件，并将其中的配置覆盖到默认配置上。
+# - 你可以只写某一个工具（例如 /describe）的 prompt，其它工具不写则不会受影响。
+# - 文件顶部包含本仓库已启用的大 MR 与 Skill 评测配置；后面的自定义 Prompt 仍全部注释。
+# - 自定义 prompt 时，system/user 都可以改；也可以只改其中一个
+#
 
-[github_app]
-pr_commands = [
-    "/describe --pr_description.publish_description_as_comment=true",
-    "/improve",
-    "/agentic_review"
-]
-
-handle_push_trigger = true
-push_commands = [
-    "/improve",
-    "/agentic_review"
-]
-
-[review_agent]
+[large_mr_review]
 enabled = true
-publish_output = true
+output_buffer_tokens = 1500
+chunk_metadata_tokens = 256
+max_chunks = 20
+max_concurrency = 4
+fail_closed = true
+
+[prompt_evolution]
+project_skill_high_fidelity_enabled = true
+project_skill_high_fidelity_gate_mode = "enforce"
+project_skill_high_fidelity_min_mrs = 1
+project_skill_high_fidelity_max_mrs = 10
+project_skill_canary_enabled = false
+project_skill_canary_percent = 0
+project_skill_canary_approved_ref = ""
+
+# ⚠️ 重要：自定义 prompt 时，务必保留原 prompt 中的关键占位符（例如 {{ diff }} / {{ diff_no_line_numbers }} / {{ title }} 等），
+# 否则工具在渲染模板时会因为变量缺失而失败，或无法拿到 PR 变更内容。
+#
+# -------------------------
+# 1) /review 自定义 prompt
+# 默认 section 名称是 [pr_review_prompt]（注意不是 pr_reviewer_prompt）
+# -------------------------
+#
+# [pr_review_prompt]
+# system = """\
+# 你是一名资深代码审查员，请基于 PR diff 进行高层级审查。
+# （保持原 prompt 的 YAML 输出要求与占位符）
+# """
+# user = """\
+# {%- if related_tickets %}
+# --PR Ticket Info--
+# {%- for ticket in related_tickets %}
+# =====
+# Ticket URL: '{{ ticket.ticket_url }}'
+#
+# Ticket Title: '{{ ticket.title }}'
+#
+# {%- if ticket.labels %}
+#
+# Ticket Labels: {{ ticket.labels }}
+#
+# {%- endif %}
+# {%- if ticket.body %}
+#
+# Ticket Description:
+# #####
+# {{ ticket.body }}
+# #####
+# {%- endif %}
+#
+# {%- if ticket.requirements is defined and ticket.requirements %}
+# Ticket Requirements:
+# #####
+# {{ ticket.requirements }}
+# #####
+# {%- endif %}
+# =====
+# {% endfor %}
+# {%- endif %}
+#
+#
+# --PR Info--
+# {%- if date %}
+#
+# Today's Date: {{date}}
+# {%- endif %}
+#
+# Title: '{{title}}'
+#
+# Branch: '{{branch}}'
+#
+# {%- if description %}
+#
+# PR Description:
+# ======
+# {{ description|trim }}
+# ======
+# {%- endif %}
+#
+# {%- if question_str %}
+#
+# =====
+# Here are questions to better understand the PR. Use the answers to provide better feedback.
+#
+# {{ question_str|trim }}
+#
+# User answers:
+# '
+# {{ answer_str|trim }}
+# '
+# =====
+# {%- endif %}
+#
+# The PR code diff:
+# ======
+# {{ diff|trim }}
+# ======
+# """
+#
+# -------------------------
+# 2) /describe 自定义 prompt
+# 默认 section 名称是 [pr_description_prompt]
+# -------------------------
+#
+# [pr_description_prompt]
+# system = """\
+# 你是一名资深工程师，请生成清晰的 PR 描述。
+# """
+# user = """\
+# {%- if related_tickets %}
+# Related Ticket Info:
+# {% for ticket in related_tickets %}
+# =====
+# Ticket Title: '{{ ticket.title }}'
+# {%- if ticket.labels %}
+# Ticket Labels: {{ ticket.labels }}
+# {%- endif %}
+# {%- if ticket.body %}
+# Ticket Description:
+# #####
+# {{ ticket.body }}
+# #####
+# {%- endif %}
+# =====
+# {% endfor %}
+# {%- endif %}
+#
+# PR Info:
+#
+# Previous title: '{{title}}'
+#
+# {%- if description %}
+#
+# Previous description:
+# =====
+# {{ description|trim }}
+# =====
+# {%- endif %}
+#
+# Branch: '{{branch}}'
+#
+# {%- if commit_messages_str %}
+#
+# Commit messages:
+# =====
+# {{ commit_messages_str|trim }}
+# =====
+# {%- endif %}
+#
+# The PR Git Diff:
+# ======
+# {{ diff|trim }}
+# ======
+# """
+#
+# -------------------------
+# 3) /improve 自定义 prompt
+# -------------------------
+#
+# [pr_code_suggestions_prompt]
+# system = """\
+# 你是一名资深软件工程师，请对新增代码（+ 行）给出可落地建议。
+# （保持原 prompt 的 YAML schema 与占位符）
+# """
+# user = """\
+# --PR Info--
+#
+# Title: '{{title}}'
+#
+# {%- if date %}
+#
+# 日期：{{date}}
+# {%- endif %}
+#
+# PR Diff：
+# ======
+# {{ diff|trim }}
+# ======
+#
+# {%- if duplicate_prompt_examples %}
+#
+# 输出示例：
+# ```yaml
+# code_suggestions:
+# - relevant_file: |
+#     src/file1.py
+#   language: |
+#     python
+#   existing_code: |
+#     ...
+#   suggestion_content: |
+#     ...
+#   improved_code: |
+#     ...
+#   one_sentence_summary: |
+#     ...
+#   label: |
+#     ...
+# ```
+# (将 '...' 替换为真实内容)
+# {%- endif %}
+# """
+#
+# [pr_code_suggestions_prompt_not_decoupled]
+# system = """\
+# 你是一名资深软件工程师，请对新增代码（+ 行）给出可落地建议（不分 hunks 模式）。
+# """
+# user = """\
+# --PR Info--
+#
+# Title: '{{title}}'
+#
+# {%- if date %}
+#
+# 日期：{{date}}
+# {%- endif %}
+#
+# PR Diff：
+# ======
+# {{ diff_no_line_numbers|trim }}
+# ======
+#
+# {%- if duplicate_prompt_examples %}
+#
+# 输出示例：
+# ```yaml
+# code_suggestions:
+# - relevant_file: |
+#     src/file1.py
+#   language: |
+#     python
+#   existing_code: |
+#     ...
+#   suggestion_content: |
+#     ...
+#   improved_code: |
+#     ...
+#   one_sentence_summary: |
+#     ...
+#   label: |
+#     ...
+# ```
+# (将 '...' 替换为真实内容)
+# {%- endif %}
+# """
+#
+# -------------------------
+# 4) /ask 自定义 prompt
+# 默认 section 名称是 [pr_questions_prompt]
+# -------------------------
+#
+# [pr_questions_prompt]
+# system = """\
+# 你是代码助手，请基于 PR diff 回答问题。
+# """
+# user = """\
+# PR Info:
+#
+# Title: '{{title}}'
+#
+# Branch: '{{branch}}'
+#
+# {%- if description %}
+#
+# Description:
+# ======
+# {{ description|trim }}
+# ======
+# {%- endif %}
+#
+# {%- if language %}
+#
+# Main PR language: '{{ language }}'
+# {%- endif %}
+#
+# The PR Git Diff:
+# ======
+# {{ diff|trim }}
+# ======
+#
+# Note that lines in the diff body are prefixed with a symbol that represents the type of change: '-' for deletions, '+' for additions, and ' ' (a space) for unchanged lines
+#
+# The PR Questions:
+# ======
+# {{ questions|trim }}
+# ======
+# """
+#
+# -------------------------
+# 5) /ask_line 自定义 prompt
+# 默认 section 名称是 [pr_line_questions_prompt]
+# -------------------------
+#
+# [pr_line_questions_prompt]
+# system = """\
+# 你是代码助手，请基于指定代码行上下文回答问题。
+# """
+# user = """\
+# PR Info:
+#
+# Title: '{{title}}'
+#
+# Branch: '{{branch}}'
+#
+# Here is a context hunk from the PR diff:
+# ======
+# {{ full_hunk|trim }}
+# ======
+#
+# Now focus on the selected lines from the hunk:
+# ======
+# {{ selected_lines|trim }}
+# ======
+#
+# Note that lines in the diff body are prefixed with a symbol that represents the type of change: '-' for deletions, '+' for additions, and ' ' (a space) for unchanged lines
+#
+# {%- if conversation_history %}
+#
+# Previous discussion on this code:
+# ======
+# {{ conversation_history|trim }}
+
+# -------------------------
+# 文档同步检查 - 在 /review 时检查代码变更是否缺少关联文档更新
+# -------------------------
+[pr_reviewer]
+extra_instructions = """\
+额外检查：代码与文档同步性审查。
+请检查本次 PR 修改的代码文件是否有对应的文档/README/markdown 文件需要同步更新但未更新。
+
+判断规则：
+1. 如果修改了 pr_agent/tools/ 下的工具实现，检查 docs/docs/tools/ 下对应文档是否也被修改。
+2. 如果修改了 pr_agent/settings/ 下的配置或 prompt，检查相关文档是否更新了配置说明。
+3. 如果修改了 ut_agent/ 下的代码，检查 ut_agent/README.md 是否需要同步。
+4. 如果新增了功能、参数、配置项，检查是否有对应的文档描述。
+5. 如果修改了安装/部署流程相关代码，检查 docs/docs/installation/ 下文档是否更新。
+
+如果发现代码有变更但关联文档未同步更新，请在 review 中明确指出：
+- 哪些代码文件的变更需要文档同步
+- 建议更新哪些文档文件
+- 简要说明需要补充的文档内容
+
+如果本次 PR 的变更不涉及用户可见行为或配置变化（如纯重构、bug fix 无接口变化），则无需文档同步，可跳过此检查。
+"""
+
+[feishu]
+post_repair_ut_enabled = true
+post_repair_ut_coverage_threshold = 80.0
+# ======
+# {%- endif %}
+#
+# A question about the selected lines:
+# ======
+# {{ question|trim }}
+# ======
+# """
+#
+# -------------------------
+# 其它常用非 prompt 配置（示例）
+# -------------------------
+#
+# [pr_code_suggestions]
+# num_code_suggestions_per_chunk = 3
+# focus_only_on_problems = true
+#
+# [pr_description]
+# enable_pr_diagram = true

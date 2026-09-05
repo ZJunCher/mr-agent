@@ -1,0 +1,18 @@
+FROM python:3.12.10-slim
+
+WORKDIR /app
+COPY requirements-embedding.txt /app/requirements-embedding.txt
+RUN pip install --no-cache-dir \
+    --index-url https://download.pytorch.org/whl/cpu \
+    torch==2.8.0+cpu
+RUN pip install --no-cache-dir -r /app/requirements-embedding.txt
+
+COPY ut_agent /app/ut_agent
+COPY scripts/download_bge_m3.py /app/scripts/download_bge_m3.py
+
+ENV HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1 \
+    SENTENCE_TRANSFORMERS_HOME=/models \
+    PYTHONPATH=/app
+
+CMD ["uvicorn", "ut_agent.repair_memory.embedding_service:app", "--host", "0.0.0.0", "--port", "8080"]

@@ -1,0 +1,26 @@
+ARG PR_AGENT_RUNTIME_BASE=gitlab_pr_agent_v6.2:latest
+FROM ${PR_AGENT_RUNTIME_BASE} AS queue_runtime
+
+WORKDIR /app
+RUN pip install --no-cache-dir redis==7.4.1
+COPY pr_agent /app/pr_agent
+COPY ut_agent /app/ut_agent
+COPY .pr_agent.toml /app/.pr_agent.toml
+RUN mkdir -p /app/ut_agent/workspace/logs
+ENV PYTHONPATH=/app
+
+FROM queue_runtime AS gitlab_web
+CMD ["python", "-m", "gunicorn", "-k", "uvicorn.workers.UvicornWorker", "-w", "2", "-b", "0.0.0.0:3000", "pr_agent.servers.gitlab_webhook:app"]
+
+FROM queue_runtime AS gitlab_agent
+CMD ["python", "-m", "pr_agent.distributed.agent_worker"]
+
+FROM queue_runtime AS feishu_worker
+CMD ["python", "-m", "pr_agent.servers.feishu_worker"]
+
+FROM queue_runtime AS repair_memory_worker
+CMD ["python", "-m", "ut_agent.repair_memory.worker"]
+
+FROM queue_runtime AS prompt_evolution_worker
+COPY scripts /app/scripts
+CMD ["python", "-m", "pr_agent.suggestions.prompt_evolution.scheduler"]

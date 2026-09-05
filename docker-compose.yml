@@ -1,0 +1,207 @@
+services:
+  pr-agent-redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    volumes:
+      - ${MR_AGENT_HOME:-./runtime}/redis/data:/data
+      - ./docker/redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+      - ${MR_AGENT_HOME:-./runtime}/redis/users.acl:/run/secrets/redis-users.acl:ro
+      - ${MR_AGENT_HOME:-./runtime}/redis/password:/run/secrets/redis-password:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - redis-cli --user pr_agent --pass "$$(cat /run/secrets/redis-password)" ping 2>/dev/null | grep -q PONG
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    networks:
+      - pr-agent-internal
+
+  bge-m3-service:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.embedding
+    image: mr-agent:bge-m3
+    restart: unless-stopped
+    cpus: "4.0"
+    mem_limit: 5g
+    volumes:
+      - ${MR_AGENT_HOME:-./runtime}/data/models:/models:ro
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health/ready', timeout=3)
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 120s
+    networks:
+      - pr-agent-internal
+
+  bge-m3-model-init:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.embedding
+    image: mr-agent:bge-m3
+    profiles: ["model-init"]
+    restart: "no"
+    command: ["python", "scripts/download_bge_m3.py", "--target", "/models"]
+    environment:
+      HF_HUB_OFFLINE: "0"
+      TRANSFORMERS_OFFLINE: "0"
+    volumes:
+      - ${MR_AGENT_HOME:-./runtime}/data/models:/models
+    networks:
+      - pr-agent-internal
+
+  pr-agent-web:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.queue
+      target: gitlab_web
+    image: mr-agent:queue-web
+    restart: unless-stopped
+    command:
+      - python
+      - -m
+      - gunicorn
+      - -k
+      - uvicorn.workers.UvicornWorker
+      - -w
+      - "2"
+      - -b
+      - 0.0.0.0:3000
+      - pr_agent.servers.gitlab_webhook:app
+    env_file:
+      - ${MR_AGENT_ENV_FILE:-.env}
+    environment:
+      PR_AGENT_EXECUTION_MODE: queue
+      PR_AGENT_REPAIR_ROLLBACK_ENABLED: "true"
+      FEISHU__POST_REPAIR_UT_ENABLED: "true"
+      FEISHU__POST_REPAIR_UT_COVERAGE_THRESHOLD: "80.0"
+      REPAIR_MEMORY__EMBEDDING_SERVICE_URL: http://bge-m3-service:8080
+    ports:
+      - "8080:3000"
+    volumes:
+      - ${MR_AGENT_HOME:-./runtime}/data:/app/data
+    depends_on:
+      pr-agent-redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:3000/health/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    networks:
+      - pr-agent-internal
+
+  pr-agent-agent:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.queue
+      target: gitlab_agent
+    image: mr-agent:queue-agent
+    restart: unless-stopped
+    command: ["python", "-m", "pr_agent.distributed.agent_worker"]
+    env_file:
+      - ${MR_AGENT_ENV_FILE:-.env}
+    environment:
+      PR_AGENT_EXECUTION_MODE: queue
+      PR_AGENT_REPAIR_ROLLBACK_ENABLED: "true"
+      FEISHU__POST_REPAIR_UT_ENABLED: "true"
+      FEISHU__POST_REPAIR_UT_COVERAGE_THRESHOLD: "80.0"
+      REPAIR_MEMORY__EMBEDDING_SERVICE_URL: http://bge-m3-service:8080
+    volumes:
+      - ${MR_AGENT_HOME:-./runtime}/data:/app/data
+      - ${MR_AGENT_HOME:-./runtime}/ut_workspace:/app/ut_agent/workspace
+    depends_on:
+      pr-agent-redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-m", "pr_agent.distributed.container_healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    deploy:
+      replicas: 3
+    networks:
+      - pr-agent-internal
+
+  pr-agent-feishu:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.queue
+      target: feishu_worker
+    image: mr-agent:queue-feishu
+    restart: unless-stopped
+    command: ["python", "-m", "pr_agent.servers.feishu_worker"]
+    env_file:
+      - ${MR_AGENT_ENV_FILE:-.env}
+    environment:
+      PR_AGENT_EXECUTION_MODE: queue
+      PR_AGENT_REPAIR_ROLLBACK_ENABLED: "true"
+      FEISHU__POST_REPAIR_UT_ENABLED: "true"
+      FEISHU__POST_REPAIR_UT_COVERAGE_THRESHOLD: "80.0"
+    depends_on:
+      pr-agent-redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-m", "pr_agent.distributed.container_healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    networks:
+      - pr-agent-internal
+
+  pr-agent-memory:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.queue
+      target: repair_memory_worker
+    image: mr-agent:queue-memory
+    restart: unless-stopped
+    command: ["python", "-m", "ut_agent.repair_memory.worker"]
+    env_file:
+      - ${MR_AGENT_ENV_FILE:-.env}
+    environment:
+      PR_AGENT_EXECUTION_MODE: queue
+      REPAIR_MEMORY__EMBEDDING_SERVICE_URL: http://bge-m3-service:8080
+    volumes:
+      - ${MR_AGENT_HOME:-./runtime}/data:/app/data
+    depends_on:
+      pr-agent-redis:
+        condition: service_healthy
+    networks:
+      - pr-agent-internal
+
+  pr-agent-prompt-evolution:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.queue
+      target: prompt_evolution_worker
+    image: mr-agent:queue-prompt-evolution
+    restart: unless-stopped
+    command: ["python", "-m", "pr_agent.suggestions.prompt_evolution.scheduler"]
+    env_file:
+      - ${MR_AGENT_ENV_FILE:-.env}
+    environment:
+      PR_AGENT_EXECUTION_MODE: queue
+    volumes:
+      - ${MR_AGENT_HOME:-./runtime}/data:/app/data
+    depends_on:
+      pr-agent-redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-m", "pr_agent.suggestions.prompt_evolution.scheduler", "--healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 4
+    networks:
+      - pr-agent-internal
+
+networks:
+  pr-agent-internal:
+    driver: bridge

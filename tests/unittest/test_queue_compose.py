@@ -8,7 +8,7 @@ def test_compose_runs_exactly_one_persistent_repair_memory_worker():
 
     memory = compose["services"]["pr-agent-memory"]
     assert memory["command"] == ["python", "-m", "ut_agent.repair_memory.worker"]
-    assert memory["volumes"] == ["/srv/mr-agent/data:/app/data"]
+    assert memory["volumes"] == ["${MR_AGENT_HOME:-./runtime}/data:/app/data"]
     assert memory["restart"] == "unless-stopped"
     assert "deploy" not in memory or memory["deploy"].get("replicas", 1) == 1
     assert memory["depends_on"]["pr-agent-redis"]["condition"] == "service_healthy"
