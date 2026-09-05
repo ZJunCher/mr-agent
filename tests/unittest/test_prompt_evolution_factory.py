@@ -137,8 +137,8 @@ def test_factory_wires_real_sources_prompts_and_project(tmp_path, monkeypatch):
 @pytest.mark.parametrize(
     ("setting_overrides", "missing_key", "message"),
     [
-        ({"target_project": "other/project"}, None, "target_project"),
-        ({"target_branch": "main"}, None, "target_branch"),
+        ({"target_project": ""}, None, "target_project"),
+        ({"target_branch": ""}, None, "target_branch"),
         ({"models": ()}, None, "models"),
         ({}, "GITLAB.URL", "GITLAB.URL"),
         ({}, "GITLAB.PERSONAL_ACCESS_TOKEN", "GITLAB.PERSONAL_ACCESS_TOKEN"),
