@@ -21,13 +21,13 @@ MR-Agent 把两类原本割裂的工作放进同一条 MR 链路：代码进入�
 
 | Agent | 负责什么 | 主要机制 |
 |---|---|---|
-| MR Review Agent | 风险识别、代码建议、证据补全、建议复核、协作通知 | 多角色审查、分布式 Runtime、反馈闭环、项目级 Dynamic Skill |
-| CI Repair Agent | 失败归因、修复计划、受控改码、流水线验证、经验沉淀 | Planner + ReAct Executor + Verifier、工具门禁、Redis Checkpoint、Repair Memory |
+| MR 智能审查与代码治理 Agent（MR Review Agent） | 风险识别、代码建议、证据补全、建议复核、协作通知 | 多角色审查、分布式 Runtime、反馈闭环、项目级 Dynamic Skill |
+| CI 流水线自修复 Agent（CI Repair Agent） | 失败归因、修复计划、受控改码、流水线验证、经验沉淀 | Planner + ReAct Executor + Verifier、工具门禁、Redis Checkpoint、Repair Memory |
 
 ```mermaid
 flowchart LR
     A[MR 创建或更新] --> B[采集 Diff 与项目上下文]
-    B --> C[MR Review Agent]
+    B --> C[MR 智能审查与代码治理 Agent]
     C --> C1[问题生成]
     C1 --> C2[证据补全]
     C2 --> C3[复核与发布决策]
@@ -35,7 +35,7 @@ flowchart LR
 
     A --> E[GitLab Pipeline]
     E -->|通过| F[进入合并门禁]
-    E -->|失败| G[CI Repair Agent]
+    E -->|失败| G[CI 流水线自修复 Agent]
     G --> G1[Planner]
     G1 --> G2[ReAct Executor]
     G2 --> G3[Verifier]
@@ -46,7 +46,7 @@ flowchart LR
     J --> F
 ```
 
-## MR Review Agent
+## MR 智能审查与代码治理 Agent
 
 Review Agent 不是把一次模型调用直接贴到 MR。它把建议生成、证据核对、价值判断和发布拆开处理，并把每一步放进可恢复的
 任务运行时。
@@ -63,7 +63,7 @@ Review Agent 不是把一次模型调用直接贴到 MR。它把建议生成、�
 相关代码主要位于 `pr_agent/suggestions/`、`pr_agent/feedback/`、`pr_agent/eval/` 和
 `pr_agent/distributed/`。
 
-## CI Repair Agent
+## CI 流水线自修复 Agent
 
 CI Repair Agent 处理的是“修复是否真的生效”，不是只生成一段看起来合理的补丁。
 
@@ -83,7 +83,7 @@ CI Repair Agent 处理的是“修复是否真的生效”，不是只生成一�
 
 ## 工程实践数据
 
-下面的数据来自项目在内部研发环境中的历史运行记录，用于说明处理规模和工程效果。私有 MR、流水线、日志和评测数据集
+以下均为历史内部部署统计，用于说明处理规模和工程效果。私有 MR、流水线、日志和评测数据集
 不在本仓库中，因此这些数字不能仅靠公开代码直接复现。
 
 | 指标 | 历史结果 |
